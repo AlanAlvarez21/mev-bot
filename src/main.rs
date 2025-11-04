@@ -18,21 +18,34 @@ async fn main() -> Result<()> {
     let network_str = if testnet { "TESTNET" } else { "MAINNET" };
     
     let strategy = env::var("STRATEGY").unwrap_or_else(|_| "sandwich".to_string());
+    println!("Debug: Strategy value read from env: {}", strategy);  // Debug line
 
     Logger::startup(network_str, &strategy);
 
     // Ethereum thread
     if strategy.contains("sandwich") || strategy.contains("arbitrage") {
-        let eth_mempool = EthMempool::new(&network).await;
-        Logger::eth_monitor_start();
-        tokio::spawn(async move { eth_mempool.start().await });
+        println!("Debug: Starting Ethereum mempool...");
+        match EthMempool::new(&network).await {
+            Ok(eth_mempool) => {
+                Logger::eth_monitor_start();
+                tokio::spawn(async move { eth_mempool.start().await });
+            }
+            Err(e) => {
+                eprintln!("Error starting Ethereum mempool: {}", e);
+            }
+        }
+    } else {
+        println!("Debug: Skipping Ethereum mempool");
     }
 
     // Solana thread
     if strategy.contains("snipe") || strategy.contains("frontrun") {
+        println!("Debug: Starting Solana mempool...");
         let sol_mempool = SolanaMempool::new(&network);
         Logger::solana_monitor_start();
         tokio::spawn(async move { sol_mempool.start().await });
+    } else {
+        println!("Debug: Skipping Solana mempool");
     }
 
     // Espera indefinida (bot corre forever)

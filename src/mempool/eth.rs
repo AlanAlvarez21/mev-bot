@@ -9,15 +9,15 @@ pub struct EthMempool {
 }
 
 impl EthMempool {
-    pub async fn new(network: &Network) -> Self {
+    pub async fn new(network: &Network) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let http_url = network.rpc_url_eth();
         // For WebSocket, we try to construct it from HTTP URL, but use environment var if available
         let ws_url = std::env::var("ETH_WS_URL")
             .unwrap_or_else(|_| http_url.replace("https://", "wss://"));
-        let ws = Ws::connect(ws_url).await.expect("Conexión WS fallida");
+        let ws = Ws::connect(ws_url).await?;
         let provider = Arc::new(Provider::new(ws));
 
-        Self { provider }
+        Ok(Self { provider })
     }
 
     pub async fn start(&self) {
