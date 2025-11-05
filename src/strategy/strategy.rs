@@ -1,10 +1,12 @@
+use crate::logging::Logger;
 use ethers::types::Transaction;
+use std::sync::Arc;
+use ethers::providers::Provider;
+use ethers::providers::Ws;
 
-// Placeholder simple: Siempre true en testnet
 pub async fn is_profitable_sandwich(_tx: &Transaction) -> bool {
-    true  // En prod: Simula con revm::simulate_swap_profit
-}
-
-pub fn is_profitable_frontrun(_tx: &str) -> bool {
-    true  // En prod: Check amount > threshold
+    // Implementación temporal - en una implementación real, esta función
+    // analizaría la transacción para determinar si es rentable para un sandwich
+    println!("Debug: Checking if transaction is profitable for sandwich");
+    true // Por ahora, retornamos true para probar
 }

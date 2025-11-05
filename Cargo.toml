@@ -30,3 +30,10 @@ reqwest = { version = "0.11", features = ["json"] }
 tokio-tungstenite = "0.20"
 url = "2.0"
 
+# WebSocket utilities
+futures-util = "0.3"
+
+# Base58 encoding for Solana transactions
+bs58 = "0.4"
+bincode = "1.3"
+

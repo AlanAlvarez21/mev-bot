@@ -1,7 +1,7 @@
 use ethers::providers::{Middleware, Provider, Ws, StreamExt};
 use std::sync::Arc;
 use crate::config::Network;
-use crate::executor::send_sandwich_bundle;
+use crate::strategy::executor::send_sandwich_bundle;
 use crate::logging::Logger;
 
 pub struct EthMempool {
