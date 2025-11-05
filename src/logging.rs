@@ -35,7 +35,7 @@ impl Logger {
     }
 
     pub fn error_occurred(error: &str) {
-        println!("{} {} {}", "⚠️".red(), "ERROR".red().bold(), error.dimmed());
+        println!("{} {} {}", "⚠️ ".red(), "ERROR".red().bold(), error.dimmed());
     }
 
     pub fn status_update(status: &str) {

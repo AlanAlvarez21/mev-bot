@@ -170,6 +170,15 @@ impl SolanaExecutor {
         
         let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
         
+        // Additional safety check: prevent execution if estimated profit is non-positive
+        if estimated_profit <= 0.0 {
+            Logger::status_update(&format!(
+                "Skipping opportunity with no positive profit potential: estimated profit {:.6} SOL", 
+                estimated_profit
+            ));
+            return Err("No positive profit potential".into());
+        }
+        
         // Verificar límites de riesgo adicionales
         if !analysis.is_profitable {
             Logger::status_update(&format!(
@@ -571,6 +580,506 @@ impl SolanaExecutor {
             Ok(result.to_string())
         } else {
             Err("Failed to parse transaction result".into())
+        }
+    }
+
+    pub async fn execute_sandwich(&self, target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update(&format!("Attempting to execute sandwich for transaction: {}", target_tx_signature));
+        
+        // Verificar si debemos continuar operando según los parámetros de riesgo
+        if !self.should_continue_operation().await? {
+            return Err("Operation halted due to risk management parameters".into());
+        }
+        
+        // Para el sandwich, buscamos arbitrajes específicos donde podemos envolver
+        // una transacción de swap con dos operaciones de compra/venta
+        let estimated_profit = self.estimate_profit_from_target(target_tx_signature)?;
+        let fees = self.calculate_transaction_fees().await?;
+        let tip_amount = if self.use_jito { 0.001 } else { 0.0 }; // 0.001 SOL como propina para Jito
+        
+        // Additional safety check: prevent execution if estimated profit is non-positive
+        if estimated_profit <= 0.0 {
+            Logger::status_update(&format!(
+                "Skipping sandwich opportunity with no positive profit potential: estimated profit {:.6} SOL", 
+                estimated_profit
+            ));
+            return Err("No positive profit potential".into());
+        }
+        
+        let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
+        
+        if !analysis.is_profitable {
+            Logger::status_update(&format!(
+                "Skipping unprofitable sandwich opportunity: net profit {:.6} SOL", 
+                analysis.net_profit
+            ));
+            return Err("Sandwich opportunity not profitable".into());
+        }
+        
+        // Verificar que el potencial de pérdida no exceda el límite configurado
+        if analysis.net_profit < -self.max_loss_per_bundle {
+            Logger::status_update(&format!(
+                "Skipping high-risk sandwich opportunity: potential loss {:.6} SOL exceeds max allowed loss {:.6} SOL", 
+                -analysis.net_profit, 
+                self.max_loss_per_bundle
+            ));
+            return Err("Sandwich opportunity exceeds maximum allowed loss".into());
+        }
+        
+        Logger::status_update(&format!(
+            "Profitable sandwich opportunity: estimated profit {:.6} SOL, fees {:.6} SOL, net profit {:.6} SOL",
+            analysis.estimated_profit,
+            analysis.total_costs,
+            analysis.net_profit
+        ));
+        
+        // Actualmente, implementamos como frontrun, pero en una implementación completa
+        // se requerirían múltiples transacciones coordinadas
+        let result = if self.use_jito {
+            Logger::status_update("Using Jito for sandwich transaction priority");
+            self.execute_sandwich_with_jito(target_tx_signature).await
+        } else {
+            Logger::status_update("Using standard RPC for sandwich transaction");
+            // Crear una transacción firmada simulada
+            let recent_blockhash_result = self.get_recent_blockhash().await;
+            let recent_blockhash = match recent_blockhash_result {
+                Ok(hash) => hash,
+                Err(e) => {
+                    Logger::error_occurred(&format!("Failed to get recent blockhash: {}", e));
+                    return Err(e);
+                }
+            };
+            
+            let transaction_data = match self.create_signed_transaction(&recent_blockhash) {
+                Ok(data) => data,
+                Err(e) => {
+                    Logger::error_occurred(&format!("Failed to create signed transaction: {}", e));
+                    return Err(e);
+                }
+            };
+            
+            // Enviar la transacción
+            let signature_result = self.send_transaction(&transaction_data).await;
+            match signature_result {
+                Ok(signature) => {
+                    Logger::status_update(&format!("Sandwich transaction sent: {}", signature));
+                    Ok(signature)
+                },
+                Err(e) => {
+                    Logger::error_occurred(&format!("Failed to send sandwich transaction: {}", e));
+                    Err(e)
+                }
+            }
+        };
+        
+        // Registrar resultados de la ejecución
+        match &result {
+            Ok(signature) => {
+                Logger::status_update(&format!("Sandwich successful: {}", signature));
+            },
+            Err(e) => {
+                Logger::error_occurred(&format!("Sandwich failed: {}", e));
+            }
+        };
+        
+        result
+    }
+
+    async fn execute_sandwich_with_jito(&self, _target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update("Preparing Jito bundle for sandwich");
+        
+        let recent_blockhash_result = self.get_recent_blockhash().await;
+        let recent_blockhash = match recent_blockhash_result {
+            Ok(hash) => hash,
+            Err(e) => {
+                let error_msg = format!("Failed to get recent blockhash for Jito bundle: {}", e);
+                Logger::error_occurred(&error_msg);
+                return Err(e);
+            }
+        };
+        
+        // Create the main transaction for the sandwich (without tip)
+        let main_transaction_data_result = self.create_signed_transaction(&recent_blockhash);
+        let main_transaction_data = match main_transaction_data_result {
+            Ok(data) => data,
+            Err(e) => {
+                let error_msg = format!("Failed to create transaction for Jito bundle: {}", e);
+                Logger::error_occurred(&error_msg);
+                return Err(e);
+            }
+        };
+        
+        // Create a tip transaction to one of Jito's tip accounts
+        let tip_transaction_data_result = self.create_tip_transaction(&recent_blockhash)?;
+        let tip_transaction_data = tip_transaction_data_result;
+        
+        // Combine both transactions for the bundle
+        let transactions = vec![main_transaction_data.clone(), tip_transaction_data];
+        
+        // Usar Jito para enviar el bundle si está disponible
+        match JitoClient::new() {
+            Some(jito_client) => {
+                Logger::status_update("Sending sandwich bundle via Jito");
+                match jito_client.send_bundle(&transactions).await {
+                    Ok(signature) => {
+                        Logger::status_update(&format!("Jito sandwich bundle sent successfully: {}", signature));
+                        Ok(signature)
+                    },
+                    Err(e) => {
+                        let error_msg = format!("Failed to send Jito bundle: {}, falling back to standard RPC", e);
+                        Logger::error_occurred(&error_msg);
+                        // Volver al RPC estándar si falla Jito
+                        self.send_transaction(&main_transaction_data).await
+                    }
+                }
+            }
+            None => {
+                Logger::status_update("Jito not configured, using standard RPC for sandwich");
+                match self.send_transaction(&main_transaction_data).await {
+                    Ok(signature) => {
+                        Logger::status_update(&format!("Sandwich transaction sent via standard RPC: {}", signature));
+                        Ok(signature)
+                    },
+                    Err(e) => {
+                        let error_msg = format!("Failed to send sandwich transaction via standard RPC: {}", e);
+                        Logger::error_occurred(&error_msg);
+                        Err(e)
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn execute_arbitrage(&self, target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update(&format!("Attempting to execute arbitrage for transaction: {}", target_tx_signature));
+        
+        // Verificar si debemos continuar operando según los parámetros de riesgo
+        if !self.should_continue_operation().await? {
+            return Err("Operation halted due to risk management parameters".into());
+        }
+        
+        // Para arbitraje, buscamos oportunidades de precios diferentes en DEXs
+        let estimated_profit = self.estimate_profit_from_target(target_tx_signature)?;
+        let fees = self.calculate_transaction_fees().await?;
+        let tip_amount = if self.use_jito { 0.001 } else { 0.0 }; // 0.001 SOL como propina para Jito
+        
+        // Additional safety check: prevent execution if estimated profit is non-positive
+        if estimated_profit <= 0.0 {
+            Logger::status_update(&format!(
+                "Skipping arbitrage opportunity with no positive profit potential: estimated profit {:.6} SOL", 
+                estimated_profit
+            ));
+            return Err("No positive profit potential".into());
+        }
+        
+        let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
+        
+        if !analysis.is_profitable {
+            Logger::status_update(&format!(
+                "Skipping unprofitable arbitrage opportunity: net profit {:.6} SOL", 
+                analysis.net_profit
+            ));
+            return Err("Arbitrage opportunity not profitable".into());
+        }
+        
+        // Verificar que el potencial de pérdida no exceda el límite configurado
+        if analysis.net_profit < -self.max_loss_per_bundle {
+            Logger::status_update(&format!(
+                "Skipping high-risk arbitrage opportunity: potential loss {:.6} SOL exceeds max allowed loss {:.6} SOL", 
+                -analysis.net_profit, 
+                self.max_loss_per_bundle
+            ));
+            return Err("Arbitrage opportunity exceeds maximum allowed loss".into());
+        }
+        
+        Logger::status_update(&format!(
+            "Profitable arbitrage opportunity: estimated profit {:.6} SOL, fees {:.6} SOL, net profit {:.6} SOL",
+            analysis.estimated_profit,
+            analysis.total_costs,
+            analysis.net_profit
+        ));
+        
+        // Actualmente, implementamos como frontrun, pero en una implementación completa
+        // se requerirían múltiples operaciones coordinadas
+        let result = if self.use_jito {
+            Logger::status_update("Using Jito for arbitrage transaction priority");
+            self.execute_arbitrage_with_jito(target_tx_signature).await
+        } else {
+            Logger::status_update("Using standard RPC for arbitrage transaction");
+            // Crear una transacción firmada simulada
+            let recent_blockhash_result = self.get_recent_blockhash().await;
+            let recent_blockhash = match recent_blockhash_result {
+                Ok(hash) => hash,
+                Err(e) => {
+                    Logger::error_occurred(&format!("Failed to get recent blockhash: {}", e));
+                    return Err(e);
+                }
+            };
+            
+            let transaction_data = match self.create_signed_transaction(&recent_blockhash) {
+                Ok(data) => data,
+                Err(e) => {
+                    Logger::error_occurred(&format!("Failed to create signed transaction: {}", e));
+                    return Err(e);
+                }
+            };
+            
+            // Enviar la transacción
+            let signature_result = self.send_transaction(&transaction_data).await;
+            match signature_result {
+                Ok(signature) => {
+                    Logger::status_update(&format!("Arbitrage transaction sent: {}", signature));
+                    Ok(signature)
+                },
+                Err(e) => {
+                    Logger::error_occurred(&format!("Failed to send arbitrage transaction: {}", e));
+                    Err(e)
+                }
+            }
+        };
+        
+        // Registrar resultados de la ejecución
+        match &result {
+            Ok(signature) => {
+                Logger::status_update(&format!("Arbitrage successful: {}", signature));
+            },
+            Err(e) => {
+                Logger::error_occurred(&format!("Arbitrage failed: {}", e));
+            }
+        };
+        
+        result
+    }
+
+    async fn execute_arbitrage_with_jito(&self, _target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update("Preparing Jito bundle for arbitrage");
+        
+        let recent_blockhash_result = self.get_recent_blockhash().await;
+        let recent_blockhash = match recent_blockhash_result {
+            Ok(hash) => hash,
+            Err(e) => {
+                let error_msg = format!("Failed to get recent blockhash for Jito bundle: {}", e);
+                Logger::error_occurred(&error_msg);
+                return Err(e);
+            }
+        };
+        
+        // Create the main transaction for the arbitrage (without tip)
+        let main_transaction_data_result = self.create_signed_transaction(&recent_blockhash);
+        let main_transaction_data = match main_transaction_data_result {
+            Ok(data) => data,
+            Err(e) => {
+                let error_msg = format!("Failed to create transaction for Jito bundle: {}", e);
+                Logger::error_occurred(&error_msg);
+                return Err(e);
+            }
+        };
+        
+        // Create a tip transaction to one of Jito's tip accounts
+        let tip_transaction_data_result = self.create_tip_transaction(&recent_blockhash)?;
+        let tip_transaction_data = tip_transaction_data_result;
+        
+        // Combine both transactions for the bundle
+        let transactions = vec![main_transaction_data.clone(), tip_transaction_data];
+        
+        // Usar Jito para enviar el bundle si está disponible
+        match JitoClient::new() {
+            Some(jito_client) => {
+                Logger::status_update("Sending arbitrage bundle via Jito");
+                match jito_client.send_bundle(&transactions).await {
+                    Ok(signature) => {
+                        Logger::status_update(&format!("Jito arbitrage bundle sent successfully: {}", signature));
+                        Ok(signature)
+                    },
+                    Err(e) => {
+                        let error_msg = format!("Failed to send Jito bundle: {}, falling back to standard RPC", e);
+                        Logger::error_occurred(&error_msg);
+                        // Volver al RPC estándar si falla Jito
+                        self.send_transaction(&main_transaction_data).await
+                    }
+                }
+            }
+            None => {
+                Logger::status_update("Jito not configured, using standard RPC for arbitrage");
+                match self.send_transaction(&main_transaction_data).await {
+                    Ok(signature) => {
+                        Logger::status_update(&format!("Arbitrage transaction sent via standard RPC: {}", signature));
+                        Ok(signature)
+                    },
+                    Err(e) => {
+                        let error_msg = format!("Failed to send arbitrage transaction via standard RPC: {}", e);
+                        Logger::error_occurred(&error_msg);
+                        Err(e)
+                    }
+                }
+            }
+        }
+    }    
+
+    pub async fn execute_snipe(&self, target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update(&format!("Attempting to snipe transaction: {}", target_tx_signature));
+        
+        // Verificar si debemos continuar operando según los parámetros de riesgo
+        if !self.should_continue_operation().await? {
+            return Err("Operation halted due to risk management parameters".into());
+        }
+        
+        // Para el snipe, buscamos oportunidades como nuevos Pools, Liquidity Adds, etc.
+        // En lugar de frontrunear una transacción, buscamos oportunidades de snipe
+        // como comprar tokens justo cuando se añade liquidez o al inicio de un pool
+        let estimated_profit = self.estimate_profit_from_target(target_tx_signature)?;
+        let fees = self.calculate_transaction_fees().await?;
+        let tip_amount = if self.use_jito { 0.001 } else { 0.0 }; // 0.001 SOL como propina para Jito
+        
+        // Additional safety check: prevent execution if estimated profit is non-positive
+        if estimated_profit <= 0.0 {
+            Logger::status_update(&format!(
+                "Skipping snipe opportunity with no positive profit potential: estimated profit {:.6} SOL", 
+                estimated_profit
+            ));
+            return Err("No positive profit potential".into());
+        }
+        
+        let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
+        
+        if !analysis.is_profitable {
+            Logger::status_update(&format!(
+                "Skipping unprofitable snipe opportunity: net profit {:.6} SOL", 
+                analysis.net_profit
+            ));
+            return Err("Snipe opportunity not profitable".into());
+        }
+        
+        // Verificar que el potencial de pérdida no exceda el límite configurado
+        if analysis.net_profit < -self.max_loss_per_bundle {
+            Logger::status_update(&format!(
+                "Skipping high-risk snipe opportunity: potential loss {:.6} SOL exceeds max allowed loss {:.6} SOL", 
+                -analysis.net_profit, 
+                self.max_loss_per_bundle
+            ));
+            return Err("Snipe opportunity exceeds maximum allowed loss".into());
+        }
+        
+        Logger::status_update(&format!(
+            "Profitable snipe opportunity: estimated profit {:.6} SOL, fees {:.6} SOL, net profit {:.6} SOL",
+            analysis.estimated_profit,
+            analysis.total_costs,
+            analysis.net_profit
+        ));
+        
+        // El método de ejecución es similar al frontrun pero conceptualmente diferente
+        let result = if self.use_jito {
+            Logger::status_update("Using Jito for snipe transaction priority");
+            self.execute_snipe_with_jito(target_tx_signature).await
+        } else {
+            Logger::status_update("Using standard RPC for snipe transaction");
+            // Crear una transacción firmada simulada
+            let recent_blockhash_result = self.get_recent_blockhash().await;
+            let recent_blockhash = match recent_blockhash_result {
+                Ok(hash) => hash,
+                Err(e) => {
+                    Logger::error_occurred(&format!("Failed to get recent blockhash: {}", e));
+                    return Err(e);
+                }
+            };
+            
+            let transaction_data = match self.create_signed_transaction(&recent_blockhash) {
+                Ok(data) => data,
+                Err(e) => {
+                    Logger::error_occurred(&format!("Failed to create signed transaction: {}", e));
+                    return Err(e);
+                }
+            };
+            
+            // Enviar la transacción
+            let signature_result = self.send_transaction(&transaction_data).await;
+            match signature_result {
+                Ok(signature) => {
+                    Logger::status_update(&format!("Snipe transaction sent: {}", signature));
+                    Ok(signature)
+                },
+                Err(e) => {
+                    Logger::error_occurred(&format!("Failed to send snipe transaction: {}", e));
+                    Err(e)
+                }
+            }
+        };
+        
+        // Registrar resultados de la ejecución
+        match &result {
+            Ok(signature) => {
+                Logger::status_update(&format!("Snipe successful: {}", signature));
+            },
+            Err(e) => {
+                Logger::error_occurred(&format!("Snipe failed: {}", e));
+            }
+        };
+        
+        result
+    }
+
+    async fn execute_snipe_with_jito(&self, _target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update("Preparing Jito bundle for snipe");
+        
+        let recent_blockhash_result = self.get_recent_blockhash().await;
+        let recent_blockhash = match recent_blockhash_result {
+            Ok(hash) => hash,
+            Err(e) => {
+                let error_msg = format!("Failed to get recent blockhash for Jito bundle: {}", e);
+                Logger::error_occurred(&error_msg);
+                return Err(e);
+            }
+        };
+        
+        // Create the main transaction for the snipe (without tip)
+        let main_transaction_data_result = self.create_signed_transaction(&recent_blockhash);
+        let main_transaction_data = match main_transaction_data_result {
+            Ok(data) => data,
+            Err(e) => {
+                let error_msg = format!("Failed to create transaction for Jito bundle: {}", e);
+                Logger::error_occurred(&error_msg);
+                return Err(e);
+            }
+        };
+        
+        // Create a tip transaction to one of Jito's tip accounts
+        let tip_transaction_data_result = self.create_tip_transaction(&recent_blockhash)?;
+        let tip_transaction_data = tip_transaction_data_result;
+        
+        // Combine both transactions for the bundle
+        let transactions = vec![main_transaction_data.clone(), tip_transaction_data];
+        
+        // Usar Jito para enviar el bundle si está disponible
+        match JitoClient::new() {
+            Some(jito_client) => {
+                Logger::status_update("Sending snipe bundle via Jito");
+                match jito_client.send_bundle(&transactions).await {
+                    Ok(signature) => {
+                        Logger::status_update(&format!("Jito snipe bundle sent successfully: {}", signature));
+                        Ok(signature)
+                    },
+                    Err(e) => {
+                        let error_msg = format!("Failed to send Jito bundle: {}, falling back to standard RPC", e);
+                        Logger::error_occurred(&error_msg);
+                        // Volver al RPC estándar si falla Jito
+                        self.send_transaction(&main_transaction_data).await
+                    }
+                }
+            }
+            None => {
+                Logger::status_update("Jito not configured, using standard RPC for snipe");
+                match self.send_transaction(&main_transaction_data).await {
+                    Ok(signature) => {
+                        Logger::status_update(&format!("Snipe transaction sent via standard RPC: {}", signature));
+                        Ok(signature)
+                    },
+                    Err(e) => {
+                        let error_msg = format!("Failed to send snipe transaction via standard RPC: {}", e);
+                        Logger::error_occurred(&error_msg);
+                        Err(e)
+                    }
+                }
+            }
         }
     }
 }

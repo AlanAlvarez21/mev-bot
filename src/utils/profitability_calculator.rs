@@ -64,8 +64,11 @@ impl ProfitabilityCalculator {
         // En frontrun, nuestro beneficio viene de aprovechar el efecto de la transacción objetivo
         let profit = our_expected_profit;
         let cost = fees;
-        let revenue = profit + cost;
-        let min_profit_margin = 0.05; // 5% más conservador para frontrun
+        // Revenue should be the total amount received, which is profit + initial capital invested
+        // But in MEV, the revenue is simply the profit if any (this is conceptually complex)
+        let revenue = profit.max(0.0); // We don't consider negative profits as negative revenue
+        let min_profit_margin = 0.2; // 20% más conservador para evitar pérdidas
+        // Para considerar rentable, el beneficio debe ser significativamente mayor que los costos
         let is_profitable = profit > fees * (1.0 + min_profit_margin);
         
         Logger::status_update(&format!(

@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use futures_util::StreamExt;
 use futures::SinkExt;
+use std::env;
 use crate::executor::solana_executor::SolanaExecutor;
 use crate::utils::profitability_calculator::{ProfitabilityCalculator, OpportunityAnalysis};
 
@@ -124,6 +125,9 @@ impl SolanaMempool {
     }
 
     async fn analyze_and_execute_opportunity(&self, executor: &SolanaExecutor, signature: &str) {
+        // Get strategy from environment variable
+        let strategy = env::var("STRATEGY").unwrap_or_else(|_| "frontrun".to_string());
+        
         // Simple detection logic - in a real implementation, this would analyze the transaction
         // for potential MEV opportunities like swaps, arbitrage, etc.
         Logger::opportunity_detected("Solana", signature);
@@ -131,8 +135,19 @@ impl SolanaMempool {
         // Calculate if the opportunity is profitable before executing
         let opportunity_analysis = self.estimate_profitability(signature).await;
         
-        if ProfitabilityCalculator::should_execute(&opportunity_analysis) {
-            // Execute frontrun strategy based on detected opportunity
+        // Additional safety check: if our estimated profit is <= 0, don't execute regardless of analysis
+        if opportunity_analysis.profit <= 0.0 {
+            Logger::status_update(&format!("Skipping opportunity with no positive profit potential: {}", signature));
+            return;
+        }
+        
+        if !ProfitabilityCalculator::should_execute(&opportunity_analysis) {
+            Logger::status_update(&format!("Skipping unprofitable opportunity: {}", signature));
+            return;
+        }
+        
+        // Execute strategy based on configuration
+        if strategy.contains("frontrun") {
             match executor.execute_frontrun(signature).await {
                 Ok(exec_signature) => {
                     Logger::bundle_sent("Solana", true);
@@ -142,8 +157,38 @@ impl SolanaMempool {
                     Logger::error_occurred(&format!("Frontrun failed for transaction {}: {}", signature, e));
                 }
             }
+        } else if strategy.contains("snipe") {
+            match executor.execute_snipe(signature).await {
+                Ok(exec_signature) => {
+                    Logger::bundle_sent("Solana", true);
+                    Logger::status_update(&format!("Snipe executed for transaction {}: {}", signature, exec_signature));
+                }
+                Err(e) => {
+                    Logger::error_occurred(&format!("Snipe failed for transaction {}: {}", signature, e));
+                }
+            }
+        } else if strategy.contains("sandwich") {
+            match executor.execute_sandwich(signature).await {
+                Ok(exec_signature) => {
+                    Logger::bundle_sent("Solana", true);
+                    Logger::status_update(&format!("Sandwich executed for transaction {}: {}", signature, exec_signature));
+                }
+                Err(e) => {
+                    Logger::error_occurred(&format!("Sandwich failed for transaction {}: {}", signature, e));
+                }
+            }
+        } else if strategy.contains("arbitrage") {
+            match executor.execute_arbitrage(signature).await {
+                Ok(exec_signature) => {
+                    Logger::bundle_sent("Solana", true);
+                    Logger::status_update(&format!("Arbitrage executed for transaction {}: {}", signature, exec_signature));
+                }
+                Err(e) => {
+                    Logger::error_occurred(&format!("Arbitrage failed for transaction {}: {}", signature, e));
+                }
+            }
         } else {
-            Logger::status_update(&format!("Skipping unprofitable opportunity: {}", signature));
+            Logger::status_update(&format!("No valid strategy configured for execution: {}", strategy));
         }
     }
     
@@ -154,20 +199,22 @@ impl SolanaMempool {
         
         Logger::status_update(&format!("Analyzing profitability for transaction: {}", signature));
         
-        // Simular el análisis de la transacción para estimar beneficios
-        // En una implementación real, esto leería los datos de la transacción
-        let fees = 0.005; // 0.005 SOL en fees promedio (taxas + Jito tips)
+        // La estrategia más segura es no asumir que hay beneficios potenciales
+        // a menos que haya datos reales que indiquen lo contrario
+        let fees = 0.006; // 0.006 SOL en fees promedio (taxas + Jito tips)
         
-        // Simular el cálculo de potencial de beneficio basado en el hash
-        let hash_numeric = self.signature_to_numeric(signature);
-        let potential_profit = (hash_numeric % 10000) as f64 / 100000.0; // Convertir a SOL (0.0000 a 0.0999 SOL)
-        
-        // Asegurar un mínimo de beneficio potencial
-        let potential_profit = potential_profit.max(0.001); // Mínimo 0.001 SOL
+        // En la práctica real, sin poder analizar realmente la transacción,
+        // no hay forma confiable de determinar si hay una oportunidad MEV.
+        // La mayoría de las transacciones que parecen oportunidades no lo son.
+        // Para evitar pérdidas, asumimos que no hay beneficio potencial real.
+        let potential_profit = 0.0; // Beneficio potencial real es 0
+        let target_impact = 0.0;    // Impacto en la transacción objetivo es desconocido
         
         Logger::status_update(&format!("Estimated profit potential: {:.6} SOL", potential_profit));
         
-        ProfitabilityCalculator::analyze_frontrun(0.0, potential_profit, fees)
+        // Importante: para evitar pérdidas, el análisis debe ser extremadamente conservador
+        // Un análisis de frontrun con 0.0 de beneficio y 0.006 de costos no debería ser rentable
+        ProfitabilityCalculator::analyze_frontrun(target_impact, potential_profit, fees)
     }
     
     fn signature_to_numeric(&self, signature: &str) -> u64 {
