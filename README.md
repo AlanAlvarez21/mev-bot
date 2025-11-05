@@ -1,6 +1,6 @@
 # Solana MEV Bot
 
-Bot de extracción de valor máximo (MEV) para la red Solana, diseñado para detectar y aprovechar oportunidades de front-running en tiempo real.
+Bot de extracción de valor máximo (MEV) para la red Solana, diseñado para detectar y aprovechar oportunidades de front-running y sniping en tiempo real.
 
 ## Características
 
@@ -49,12 +49,14 @@ NETWORK=devnet  # o "mainnet" para producción
 SOLANA_RPC_URL=https://api.devnet.solana.com  # Cambia a mainnet si corres en mainnet
 SOLANA_WS_URL=wss://api.devnet.solana.com    # Cambia a mainnet si corres en mainnet
 
-# Configuración de Jito
+# Configuración de Jito (para transacciones prioritarias)
 USE_JITO=true
-JITO_RPC_URL=https://mainnet.block-engine.jito.wtf/api/v1/bundles  # Para mainnet
+JITO_RPC_URL=https://testnet.block-engine.jito.wtf/api/v1/bundles
+
+# Cuentas de tip recomendadas por Jito (para Devnet)
 JITO_TIP_ACCOUNT=96gYZGLnJYVFJZpLUWK4JGsRU1uKiuN5Mjfn4xh3F933
 
-# Estrategias MEV
+# Estrategias MEV para Solana
 STRATEGY=frontrun,snipe
 ```
 
@@ -90,40 +92,58 @@ solana-keygen new --outfile solana-keypair.json --no-passphrase
   NETWORK=mainnet
   SOLANA_RPC_URL=https://api.mainnet-beta.solana.com  # O un endpoint RPC privado
   SOLANA_WS_URL=wss://api.mainnet-beta.solana.com
+  
+  # Para Jito en Mainnet
+  JITO_RPC_URL=https://mainnet.block-engine.jito.wtf/api/v1/bundles
   ```
 
-## Cómo implementar en Mainnet
+## Cómo obtener acceso a Jito para Mainnet
 
-### 1. Cambios necesarios para Mainnet
+### 1. Aplicar al programa MEV de Jito:
 
-#### .env changes:
+Para usar Jito en Mainnet con autenticación completa:
+
+1. Visita: https://www.jito.wtf/
+2. Busca el programa de "Searcher Registration" o "MEV Program"
+3. Completa el formulario de aplicación
+4. Espera aprobación (puede tomar varios días)
+5. Recibirás un token de autenticación (UUID)
+
+### 2. Actualizar la configuración:
+
+Después de obtener acceso, actualiza tu `.env`:
+
 ```
-# Cambia NETWORK a mainnet
+# Mainnet con Jito autenticado
 NETWORK=mainnet
-
-# Usa endpoints de Mainnet
-SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
-SOLANA_WS_URL=wss://api.mainnet-beta.solana.com
-
-# Asegúrate de tener una cuenta con credenciales reales de Jito
+USE_JITO=true
 JITO_RPC_URL=https://mainnet.block-engine.jito.wtf/api/v1/bundles
-# Necesitarás un token de autenticación real de Jito
-JITO_AUTH_TOKEN=your_real_jito_auth_token
+JITO_TIP_ACCOUNT=96gYZGLnJYVFJZpLUWK4JGsRU1uKiuN5Mjfn4xh3F933
+JITO_AUTH_HEADER=Bearer tu_uuid_real_aqui
 ```
 
-#### Billetera:
-- Usa una billetera con fondos reales en Mainnet
-- Mantén un saldo seguro para cubrir tarifas y posibles pérdidas durante el aprendizaje
+### 3. Configuración de cuentas de tip (Mainnet)
 
-### 2. Consideraciones de seguridad para Mainnet
+Para mainnet, puedes usar cualquiera de estas cuentas de tip recomendadas por Jito:
+
+```
+JITO_TIP_ACCOUNT=96gYZGLnJYVFJZpLUWK4JGsRU1uKiuN5Mjfn4xh3F933
+# O cualquiera de estas otras:
+# HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe
+# Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY
+# ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49
+# DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh
+# ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt
+# DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL
+# 3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT
+```
+
+## Consideraciones de seguridad para Mainnet
 
 - **Guarda tu clave privada con extrema seguridad**
 - **Haz copias de seguridad del archivo de clave**
 - **No compartas nunca el archivo de clave privada**
 - **Considera usar una billetera hardware si es posible**
-
-### 3. Consideraciones de riesgo para Mainnet
-
 - **Empieza con pequeñas cantidades**: Haz pruebas con pequeños montos primero
 - **Entiende que puedes perder fondos**: Las estrategias MEV no garantizan ganancias
 - **Monitorea constantemente**: Supervisa las operaciones en todo momento

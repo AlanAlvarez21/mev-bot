@@ -6,21 +6,6 @@ pub enum Network {
 }
 
 impl Network {
-    pub fn rpc_url_eth(&self) -> String {
-        match self {
-            Network::Testnet => std::env::var("ETH_RPC_URL").unwrap_or_else(|_| "https://1rpc.io/sepolia".to_string()),
-            Network::Mainnet => {
-                let api_key = std::env::var("INFURA_PROJECT_ID").unwrap_or_else(|_| "TU_KEY".to_string());
-                if api_key == "TU_KEY" {
-                    std::env::var("ETH_RPC_URL").unwrap_or_else(|_| format!("https://mainnet.infura.io/v3/{}", api_key))
-                } else {
-                    format!("https://mainnet.infura.io/v3/{}", api_key)
-                }
-            }
-            Network::Devnet => std::env::var("ETH_RPC_URL").unwrap_or_else(|_| "https://1rpc.io/sepolia".to_string()),
-        }
-    }
-
     pub fn rpc_url_sol(&self) -> String {
         match self {
             Network::Testnet => std::env::var("SOL_RPC_URL").unwrap_or_else(|_| "https://api.devnet.solana.com".to_string()),

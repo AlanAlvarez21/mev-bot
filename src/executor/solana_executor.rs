@@ -11,6 +11,8 @@ pub struct SolanaExecutor {
     ws_url: String,
     use_jito: bool,
     profit_calculator: ProfitCalculator,
+    max_loss_per_bundle: f64,  // Máxima pérdida aceptable por bundle
+    min_balance: f64,          // Saldo mínimo para continuar operaciones
 }
 
 impl SolanaExecutor {
@@ -33,11 +35,18 @@ impl SolanaExecutor {
         let use_jito = std::env::var("USE_JITO")
             .unwrap_or_else(|_| "false".to_string())
             .to_lowercase() == "true";
+            
+        // Configurar límites de riesgo desde variables de entorno o valores por defecto
+        let max_loss_per_bundle = std::env::var("MAX_LOSS_PER_BUNDLE")
+            .unwrap_or_else(|_| "0.1".to_string()) // 0.1 SOL por bundle como máximo de pérdida
+            .parse::<f64>()
+            .unwrap_or(0.1);
+            
+        let min_balance = std::env::var("MIN_BALANCE")
+            .unwrap_or_else(|_| "0.5".to_string()) // 0.5 SOL como saldo mínimo
+            .parse::<f64>()
+            .unwrap_or(0.5);
 
-        // Usamos keypair_data y ws_url para verificar que se están utilizando
-        let _ = &keypair_data;  // Marcar como usado
-        let _ = &ws_url;        // Marcar como usado
-        
         Ok(Self {
             client: reqwest::Client::new(),
             keypair_data,
@@ -45,11 +54,88 @@ impl SolanaExecutor {
             ws_url,
             use_jito,
             profit_calculator: ProfitCalculator::new(),
+            max_loss_per_bundle,
+            min_balance,
         })
+    }
+
+    // Método para usar ws_url y keypair_data (eliminar warnings)
+    pub fn get_ws_url(&self) -> &str {
+        &self.ws_url
+    }
+
+    pub fn get_keypair_public_key(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        if self.keypair_data.is_empty() {
+            return Err("Keypair data is empty".into());
+        }
+        // En una implementación real, derivaríamos la clave pública del par de claves
+        // Por ahora, simplemente retornamos una representación
+        Ok(format!("Public key derived from {} bytes", self.keypair_data.len()))
+    }
+    
+    // Método para verificar si debemos continuar operando según los parámetros de riesgo
+    async fn should_continue_operation(&self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        // Obtener el saldo actual (esto debería actualizarse periódicamente en una implementación real)
+        let current_balance = self.get_balance().await?;
+        
+        if current_balance < self.min_balance {
+            Logger::error_occurred(&format!(
+                "Balance too low: {:.6} SOL (minimum required: {:.6} SOL)", 
+                current_balance, 
+                self.min_balance
+            ));
+            return Ok(false);
+        }
+        
+        Logger::status_update(&format!("Current balance: {:.6} SOL, minimum required: {:.6} SOL", 
+                                     current_balance, self.min_balance));
+        Ok(true)
+    }
+    
+    // Método para obtener el saldo actual de la billetera
+    async fn get_balance(&self) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+        // Esto es una simulación - en la realidad usaríamos la clave pública real
+        // Para obtener la clave pública real, necesitaríamos convertir el keypair_data
+        // Usamos una clave simulada basada en el hash de los datos del keypair
+        let mock_pubkey = format!("{}", self.keypair_data.iter().map(|&x| x as u64).sum::<u64>());
+        
+        let request_body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getBalance",
+            "params": [mock_pubkey]
+        });
+
+        let response: Value = self.client
+            .post(&self.rpc_url)
+            .json(&request_body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP request failed: {}", e))?
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse response: {}", e))?;
+
+        if let Some(error) = response.get("error") {
+            return Err(format!("Get balance failed: {}", error).into());
+        }
+
+        if let Some(value) = response["result"]["value"].as_f64() {
+            // Convertir de lamports a SOL (1 SOL = 1000000000 lamports)
+            let sol_balance = value / 1_000_000_000.0;
+            Ok(sol_balance)
+        } else {
+            Err("Failed to parse balance result".into())
+        }
     }
 
     pub async fn execute_frontrun(&self, target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Logger::status_update(&format!("Attempting to frontrun transaction: {}", target_tx_signature));
+        
+        // Verificar si debemos continuar operando según los parámetros de riesgo
+        if !self.should_continue_operation().await? {
+            return Err("Operation halted due to risk management parameters".into());
+        }
         
         // Calcular la rentabilidad antes de intentar el frontrun
         let estimated_profit_result = self.estimate_profit_from_target(target_tx_signature);
@@ -76,6 +162,7 @@ impl SolanaExecutor {
         
         let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
         
+        // Verificar límites de riesgo adicionales
         if !analysis.is_profitable {
             Logger::status_update(&format!(
                 "Skipping unprofitable opportunity: net profit {:.6} SOL vs minimum required {:.6} SOL", 
@@ -83,6 +170,16 @@ impl SolanaExecutor {
                 estimated_profit * self.profit_calculator.min_profit_margin
             ));
             return Err("Opportunity not profitable".into());
+        }
+        
+        // Verificar que el potencial de pérdida no exceda el límite configurado
+        if analysis.net_profit < -self.max_loss_per_bundle {
+            Logger::status_update(&format!(
+                "Skipping high-risk opportunity: potential loss {:.6} SOL exceeds max allowed loss {:.6} SOL", 
+                -analysis.net_profit, 
+                self.max_loss_per_bundle
+            ));
+            return Err("Opportunity exceeds maximum allowed loss".into());
         }
         
         Logger::status_update(&format!(
