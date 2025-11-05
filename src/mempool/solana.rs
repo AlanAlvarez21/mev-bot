@@ -3,8 +3,8 @@ use crate::logging::Logger;
 use reqwest;
 use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
-use futures_util::{SinkExt, StreamExt};
-use futures::StreamExt as FuturesStreamExt;
+use futures_util::StreamExt;
+use futures::SinkExt;
 use crate::executor::solana_executor::SolanaExecutor;
 use crate::utils::profitability_calculator::{ProfitabilityCalculator, OpportunityAnalysis};
 
