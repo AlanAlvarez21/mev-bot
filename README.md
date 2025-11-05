@@ -1,253 +1,164 @@
-# Rust MEV Hybrid Bot
+# Solana MEV Bot
 
-A multi-chain MEV (Maximum Extractable Value) bot written in Rust that operates on both Ethereum and Solana networks. This bot monitors mempools in real-time to identify and execute profitable arbitrage, sandwich, and frontrun trading strategies.
+Bot de extracción de valor máximo (MEV) para la red Solana, diseñado para detectar y aprovechar oportunidades de front-running en tiempo real.
 
-## Features
+## Características
 
-- **Multi-chain Support**: Operates on both Ethereum and Solana simultaneously
-- **Real-time Mempool Monitoring**: Tracks pending transactions via WebSocket connections
-- **Multiple MEV Strategies**: Implements sandwich attacks, arbitrage, and frontrunning
-- **Privacy-First Execution**: Uses Flashbots (Ethereum) and Jito (Solana) for private transaction bundles
-- **Configurable Strategies**: Easily switch between different MEV strategies
-- **Testnet Compatible**: Designed for safe testing on testnet environments
+- ⚡ **Detección en tiempo real**: Monitorea el mempool de Solana para identificar oportunidades MEV
+- 🚀 **Integración con Jito**: Envia transacciones con prioridad para mayor éxito en frontrun
+- 🔒 **Firmado de transacciones**: Creación de transacciones firmadas con clave privada
+- 💰 **Cálculo de rentabilidad**: Evalúa oportunidades para evitar pérdidas
+- 🛡️ **Manejo robusto de errores**: Sistema completo de gestión de fallos
+- 📊 **Registro detallado**: Todos los eventos y oportunidades son registrados
 
-## Prerequisites
+## Requisitos previos
 
-- [Rust](https://www.rust-lang.org/tools/install) (latest stable version)
-- A computer capable of running Rust applications continuously
-- (Optional) Access to premium RPC providers for better performance
+- Rust (versión 1.70 o superior)
+- Una cuenta en Solana Devnet o Mainnet Beta
+- Clave privada de billetera Solana (archivo JSON)
+- Acceso a un RPC de Solana (público o privado)
 
-## Installation
+## Instalación
 
-1. Clone the repository:
-
+1. **Clona el repositorio:**
 ```bash
-git clone https://github.com/yourusername/rust-mev-hybrid-bot.git
-cd rust-mev-hybrid-bot
+git clone [URL_DEL_REPOSITORIO]
+cd solana-mev-bot
 ```
 
-2. Install Rust dependencies:
-
+2. **Instala Rust si aún no lo tienes:**
 ```bash
-cargo build
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
 ```
 
-## Configuration
-
-1. Create a `.env` file in the project root with the following environment variables:
-
-```env
-# Ethereum configuration
-ETH_PRIVATE_KEY="your_ethereum_private_key_here"
-ETH_RPC_URL="https://mainnet.infura.io/v3/YOUR_INFURA_KEY"  # or use sepolia for testnet
-
-# Solana configuration  
-SOLANA_PRIVATE_KEY="your_solana_private_key_here"
-SOLANA_RPC_URL="https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY"  # or devnet for testnet
-
-# Network selection (true for testnet, false for mainnet)
-TESTNET=true
-
-# Strategy selection (comma-separated)
-STRATEGY="sandwich,arbitrage,snipe,frontrun"
-
-# Logging level
-RUST_LOG=info
-```
-
-2. Key configuration notes:
-   - Use testnet private keys for testing to avoid financial risk
-   - On mainnet, ensure your wallet has sufficient ETH/SOL for transaction fees
-   - For testnet, you can generate new keys or use faucets for test tokens
-
-## How to Test
-
-### 1. Setup for Testing
-
-For safe testing, use testnet networks:
-
-- **Ethereum**: Sepolia testnet
-- **Solana**: Devnet
-
-### 2. Testnet Configuration
-
-Set up your `.env` for testnet:
-
-```env
-TESTNET=true
-ETH_PRIVATE_KEY="0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80" # Example Anvil/Ethereum test key
-SOLANA_PRIVATE_KEY="5L3Q6fK4J69W41mTsyfxY7vU6EA7Xq5YxZJw1a4M7K7z2L8q9R4P3N1H6V5J2C9K7Z8" # Replace with new test key
-RUST_LOG=debug
-```
-
-### 3. Running the Bot
-
-To run the bot with specific strategies:
-
-```bash
-# Run with sandwich and arbitrage strategies (Ethereum only)
-STRATEGY="sandwich,arbitrage" cargo run
-
-# Run with snipe and frontrun strategies (Solana only)
-STRATEGY="snipe,frontrun" cargo run
-
-# Run with all strategies
-STRATEGY="sandwich,arbitrage,snipe,frontrun" cargo run
-
-# Run with verbose logging
-RUST_LOG=debug STRATEGY="sandwich" cargo run
-```
-
-### 4. Testing Strategies
-
-#### Ethereum Strategies (Sandwich/Arbitrage):
-
-- The bot will monitor pending transactions on the Ethereum mempool
-- On testnet: Look for transactions that simulate profitable DEX swaps
-- The bot will attempt to sandwich or arbitrage these transactions using Flashbots
-- Monitor logs for "Oportunidad detectada" messages
-
-#### Solana Strategies (Snipe/Frontrun):
-
-- The bot will monitor Raydium and other DEX transactions
-- On testnet: Look for transactions on testnet DEX programs
-- The bot will attempt to frontrun profitable transactions using Jito
-- Monitor logs for "Oportunidad detectada" messages
-
-### 5. Verification Steps
-
-1. **Check logs**: Verify the bot is connecting to both networks
-2. **Monitor mempool activity**: Look for "Monitoreando mempool" messages
-3. **Test transaction detection**: You can broadcast test transactions to see if the bot detects them
-4. **Check bundle submissions**: Verify bundle submission attempts (on testnet only)
-
-### 6. Safe Testing Practices
-
-- **Always start with testnet**: Never run the bot on mainnet until thoroughly tested
-- **Use small amounts**: When testing on testnet, use transactions with small amounts
-- **Monitor gas costs**: Ensure transaction fees don't exceed potential profits
-- **Review strategies**: Understand each strategy before enabling it
-- **Simulate profitably**: The current implementation has placeholder profitability checks
-
-## Strategies Explained
-
-### Sandwich Attack
-
-- Front-run a large buy order to increase price
-- Back-run after the victim transaction to capture profit
-- Works on DEXs like Uniswap, Sushiswap, etc.
-
-### Arbitrage
-
-- Exploit price differences between exchanges
-- Execute simultaneous buy/sell transactions
-- Capture risk-free profit from price discrepancies
-
-### Frontrun
-
-- Execute profitable transactions ahead of detected transactions
-- Intercept DEX swaps that would be profitable
-- Capture value from price impact
-
-### Snipe
-
-- Identify and execute specific profitable opportunities
-- Target token launches, liquidity additions, etc.
-
-## Building for Production
-
-To build an optimized version:
-
+3. **Compila el proyecto:**
 ```bash
 cargo build --release
 ```
 
-The binary will be available at `target/release/rust-mev-hybrid-bot`
+## Configuración
 
-## Development
+Crea un archivo `.env` en la raíz del proyecto con la siguiente estructura:
 
-The project is organized as follows:
+```
+# Configuración de red
+NETWORK=devnet  # o "mainnet" para producción
 
-- `src/mempool/`: Mempool monitoring logic for both chains
-- `src/executor/`: Transaction execution and bundle creation
-- `src/strategy/`: MEV strategy logic and opportunity detection
-- `src/utils/`: Helper functions and utilities
+# Configuración de Solana
+SOLANA_RPC_URL=https://api.devnet.solana.com  # Cambia a mainnet si corres en mainnet
+SOLANA_WS_URL=wss://api.devnet.solana.com    # Cambia a mainnet si corres en mainnet
 
-## Risks and Considerations
+# Configuración de Jito
+USE_JITO=true
+JITO_RPC_URL=https://mainnet.block-engine.jito.wtf/api/v1/bundles  # Para mainnet
+JITO_TIP_ACCOUNT=96gYZGLnJYVFJZpLUWK4JGsRU1uKiuN5Mjfn4xh3F933
 
-- **Financial Risk**: MEV strategies carry significant financial risk, especially on mainnet
-- **Competition**: Intense competition with other MEV bots
-- **Network Congestion**: High gas fees and transaction costs
-- **Smart Contract Risk**: Possible contract exploits or changes
-- **Regulatory Risk**: MEV activities may face regulatory changes
+# Estrategias MEV
+STRATEGY=frontrun,snipe
+```
 
-## License
+## Configuración de billetera
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+Guarda tu archivo de clave privada de Solana como `solana-keypair.json` en la raíz del proyecto. Puedes generar uno con:
 
+```bash
+solana-keygen new --outfile solana-keypair.json --no-passphrase
+```
 
+## Modo Devnet vs Mainnet
 
+### Devnet (Para pruebas)
 
-  Complete Setup Guide
+- **RPC URLs**: Usa endpoints de Devnet
+- **Saldo**: Puedes obtener SOL gratuito con `solana airdrop`
+- **Riesgo**: 0, perfecto para pruebas
+- **Configuración típica**:
+  ```
+  NETWORK=devnet
+  SOLANA_RPC_URL=https://api.devnet.solana.com
+  SOLANA_WS_URL=wss://api.devnet.solana.com
+  ```
 
-  Step 1: Prerequisites
+### Mainnet (Producción)
 
-1. Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-2. Install Git: brew install git (on macOS) or download from git-scm.com
-3. Clone the repository: git clone https://github.com/your-repo/crypto_mev_bot.git
-4. Navigate to the project directory: cd crypto_mev_bot
+- **RPC URLs**: Usa endpoints de Mainnet Beta
+- **Saldo**: Solo SOL real, con valor económico
+- **Riesgo**: Alto, puedes perder fondos si algo falla
+- **Configuración típica**:
+  ```
+  NETWORK=mainnet
+  SOLANA_RPC_URL=https://api.mainnet-beta.solana.com  # O un endpoint RPC privado
+  SOLANA_WS_URL=wss://api.mainnet-beta.solana.com
+  ```
 
-  Step 2: Create Your .env File
-  Create a .env file in the project root with the following content:
+## Cómo implementar en Mainnet
 
-    1 # For testing on testnet (set to "true")
-    2 TESTNET=true
-    3
-    4 # Ethereum Configuration (Testnet example)
-    5 ETH_PRIVATE_KEY="your_sepolia_private_key_here"
-    6
-    7 # Solana Configuration (Testnet example)
-    8 SOLANA_PRIVATE_KEY="your_solana_testnet_private_key_here"
-    9
-   10 # Logging level
-   11 RUST_LOG=info
+### 1. Cambios necesarios para Mainnet
 
-  Step 3: Get Testnet Keys and Funds
+#### .env changes:
+```
+# Cambia NETWORK a mainnet
+NETWORK=mainnet
 
-1. For Ethereum Sepolia:
+# Usa endpoints de Mainnet
+SOLANA_RPC_URL=https://api.mainnet-beta.solana.com
+SOLANA_WS_URL=wss://api.mainnet-beta.solana.com
 
-   - Install MetaMask
-   - Switch to Sepolia testnet
-   - Generate a new account
-   - Get test ETH from a faucet
-2. For Solana Devnet:
+# Asegúrate de tener una cuenta con credenciales reales de Jito
+JITO_RPC_URL=https://mainnet.block-engine.jito.wtf/api/v1/bundles
+# Necesitarás un token de autenticación real de Jito
+JITO_AUTH_TOKEN=your_real_jito_auth_token
+```
 
-   - Install Phantom wallet
-   - Switch to Devnet
-   - Generate a new account
-   - Get test SOL from faucet
+#### Billetera:
+- Usa una billetera con fondos reales en Mainnet
+- Mantén un saldo seguro para cubrir tarifas y posibles pérdidas durante el aprendizaje
 
-  Step 4: Add Your Private Keys
-  IMPORTANT: Use only testnet keys for initial testing!
+### 2. Consideraciones de seguridad para Mainnet
 
-- In MetaMask: Account options → Export Private Key
-- In Phantom: Settings → Export Secret Recovery Phrase (then derive your private key)
+- **Guarda tu clave privada con extrema seguridad**
+- **Haz copias de seguridad del archivo de clave**
+- **No compartas nunca el archivo de clave privada**
+- **Considera usar una billetera hardware si es posible**
 
-  Add these to your .env file as ETH_PRIVATE_KEY and SOLANA_PRIVATE_KEY.
+### 3. Consideraciones de riesgo para Mainnet
 
-  Step 5: Run the Bot
+- **Empieza con pequeñas cantidades**: Haz pruebas con pequeños montos primero
+- **Entiende que puedes perder fondos**: Las estrategias MEV no garantizan ganancias
+- **Monitorea constantemente**: Supervisa las operaciones en todo momento
+- **Prepara sistemas de límite de pérdidas**: Configura controles para detener pérdidas grandes
 
-   1 # Run with specific strategies (e.g., only Ethereum sandwich)
-   2 STRATEGY="sandwich" cargo run
-   3
-   4 # Or run with all strategies
-   5 STRATEGY="sandwich,arbitrage,snipe,frontrun" cargo run
+## Ejecución
 
-  Step 6: Monitor the Output
-  Watch the console for:
+1. **Para Devnet:**
+```bash
+cargo run
+```
 
-- "Monitoreando mempool" messages (indicating successful connection)
-- "Oportunidad detectada" (when potentially profitable transactions are found)
-- Any error messages that might indicate configuration issues
+2. **Para Mainnet (después de configurar correctamente):**
+```bash
+NETWORK=mainnet cargo run
+```
 
-  Remember: Start with testnet keys only. MEV strategies are complex and may result in losses. Understand the risks before using mainnet funds.
+## Cómo funciona
+
+El bot realiza los siguientes pasos:
+
+1. **Monitoreo**: Se conecta al mempool de Solana vía WebSocket para recibir transacciones en tiempo real
+2. **Análisis**: Evalúa cada oportunidad para determinar si es rentable
+3. **Firmado**: Crea transacciones firmadas usando tu clave privada
+4. **Prioridad**: Si está configurado Jito, envía transacciones con prioridad
+5. **Ejecución**: Intenta ejecutar estrategias MEV como frontrun o snipe
+
+## Contribuciones
+
+Las contribuciones son bienvenidas. Por favor abre un issue o PR para discutir cambios.
+
+## Advertencia
+
+Este bot opera en mercados altamente competitivos y puede resultar en la pérdida de fondos. Ú️ ¡Úsalo bajo tu propio riesgo! No somos responsables de ninguna pérdida financiera.
+
+## Licencia
+
+MIT
