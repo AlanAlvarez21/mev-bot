@@ -3,6 +3,10 @@ use reqwest;
 use serde_json::{json, Value};
 use crate::utils::jito::JitoClient;
 use crate::utils::profit_calculator::ProfitCalculator;
+use solana_sdk::{
+    signature::{Keypair, Signer},
+};
+use std::str::FromStr;
 
 pub struct SolanaExecutor {
     client: reqwest::Client,
@@ -68,9 +72,12 @@ impl SolanaExecutor {
         if self.keypair_data.is_empty() {
             return Err("Keypair data is empty".into());
         }
-        // En una implementación real, derivaríamos la clave pública del par de claves
-        // Por ahora, simplemente retornamos una representación
-        Ok(format!("Public key derived from {} bytes", self.keypair_data.len()))
+        
+        let keypair = Keypair::from_bytes(&self.keypair_data)
+            .map_err(|e| format!("Invalid keypair data: {}", e))?;
+        let pubkey = keypair.pubkey();
+        
+        Ok(pubkey.to_string())
     }
     
     // Método para verificar si debemos continuar operando según los parámetros de riesgo
@@ -94,16 +101,17 @@ impl SolanaExecutor {
     
     // Método para obtener el saldo actual de la billetera
     async fn get_balance(&self) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
-        // Esto es una simulación - en la realidad usaríamos la clave pública real
-        // Para obtener la clave pública real, necesitaríamos convertir el keypair_data
-        // Usamos una clave simulada basada en el hash de los datos del keypair
-        let mock_pubkey = format!("{}", self.keypair_data.iter().map(|&x| x as u64).sum::<u64>());
+        // Derivar la clave pública del par de claves
+        let keypair = Keypair::from_bytes(&self.keypair_data)
+            .map_err(|e| format!("Invalid keypair data: {}", e))?;
+        let pubkey = keypair.pubkey();
+        let pubkey_str = pubkey.to_string();
         
         let request_body = json!({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "getBalance",
-            "params": [mock_pubkey]
+            "params": [pubkey_str]
         });
 
         let response: Value = self.client
@@ -242,8 +250,6 @@ impl SolanaExecutor {
     async fn execute_frontrun_with_jito(&self, _target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Logger::status_update("Preparing Jito bundle for frontrun");
         
-        // En una implementación completa, crearíamos una transacción real con tip
-        // Por ahora, simulamos la creación de un bundle con Jito
         let recent_blockhash_result = self.get_recent_blockhash().await;
         let recent_blockhash = match recent_blockhash_result {
             Ok(hash) => hash,
@@ -254,8 +260,9 @@ impl SolanaExecutor {
             }
         };
         
-        let transaction_data_result = self.create_signed_transaction(&recent_blockhash);
-        let transaction_data = match transaction_data_result {
+        // Create the main transaction for the frontrun (without tip)
+        let main_transaction_data_result = self.create_signed_transaction(&recent_blockhash);
+        let main_transaction_data = match main_transaction_data_result {
             Ok(data) => data,
             Err(e) => {
                 let error_msg = format!("Failed to create transaction for Jito bundle: {}", e);
@@ -264,11 +271,18 @@ impl SolanaExecutor {
             }
         };
         
+        // Create a tip transaction to one of Jito's tip accounts
+        let tip_transaction_data_result = self.create_tip_transaction(&recent_blockhash)?;
+        let tip_transaction_data = tip_transaction_data_result;
+        
+        // Combine both transactions for the bundle
+        let transactions = vec![main_transaction_data.clone(), tip_transaction_data];
+        
         // Usar Jito para enviar el bundle si está disponible
         match JitoClient::new() {
             Some(jito_client) => {
                 Logger::status_update("Sending bundle via Jito");
-                match jito_client.send_bundle(&[transaction_data.clone()]).await {
+                match jito_client.send_bundle(&transactions).await {
                     Ok(signature) => {
                         Logger::status_update(&format!("Jito bundle sent successfully: {}", signature));
                         Ok(signature)
@@ -277,13 +291,13 @@ impl SolanaExecutor {
                         let error_msg = format!("Failed to send Jito bundle: {}, falling back to standard RPC", e);
                         Logger::error_occurred(&error_msg);
                         // Volver al RPC estándar si falla Jito
-                        self.send_transaction(&transaction_data).await
+                        self.send_transaction(&main_transaction_data).await
                     }
                 }
             }
             None => {
                 Logger::status_update("Jito not configured, using standard RPC");
-                match self.send_transaction(&transaction_data).await {
+                match self.send_transaction(&main_transaction_data).await {
                     Ok(signature) => {
                         Logger::status_update(&format!("Transaction sent via standard RPC: {}", signature));
                         Ok(signature)
@@ -426,19 +440,20 @@ impl SolanaExecutor {
         
         Logger::status_update(&format!("Creating signed transaction for frontrun with blockhash: {}", blockhash));
         
-        // En una implementación completamente funcional, usaríamos solana-sdk para:
-        /*
+        // Usamos solana-sdk para crear una transacción firmada real
         use solana_sdk::{
             signature::{Keypair, Signer},
             pubkey::Pubkey,
             system_instruction,
             message::Message,
             transaction::Transaction,
+            hash::Hash,
         };
         
         let keypair = Keypair::from_bytes(&self.keypair_data)
             .map_err(|e| format!("Invalid keypair data: {}", e))?;
         
+        // Creamos una dirección aleatoria como destino para la transacción de frontrun
         let recipient = Pubkey::new_unique();
         let instruction = system_instruction::transfer(
             &keypair.pubkey(),
@@ -464,11 +479,64 @@ impl SolanaExecutor {
             .map_err(|e| format!("Failed to serialize transaction: {}", e))?;
         
         let encoded_tx = bs58::encode(serialized_tx).into_string();
-        */
         
-        // POR AHORA, SIMULAMOS EL RESULTADO DE UNA TRANSACCIÓN FIRMAADA REAL
-        // EN UNA IMPLEMENTACIÓN REAL, ESTO SERÍA UNA TRANSACCIÓN COMPLETAMENTE CONSTRUIDA Y FIRMADA
-        Ok("signed_transaction_data_goes_here".to_string())
+        Ok(encoded_tx)
+    }
+
+    fn create_tip_transaction(&self, blockhash: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update("Creating tip transaction for Jito bundle");
+        
+        if self.keypair_data.is_empty() {
+            return Err("Keypair data is empty".into());
+        }
+
+        use solana_sdk::{
+            signature::{Keypair, Signer},
+            system_instruction,
+            message::Message,
+            transaction::Transaction,
+            hash::Hash,
+        };
+        
+        let keypair = Keypair::from_bytes(&self.keypair_data)
+            .map_err(|e| format!("Invalid keypair data: {}", e))?;
+        
+        // Get a Jito tip account from the JitoClient
+        let jito_client = JitoClient::new().ok_or("Jito client not initialized")?;
+        let tip_recipient = jito_client.get_random_tip_account();
+        
+        Logger::status_update(&format!("Using tip account: {}", tip_recipient));
+        
+        // Send a small tip (0.001 SOL) to the Jito tip account
+        let tip_amount = 1_000_000; // 0.001 SOL in lamports
+        let tip_instruction = system_instruction::transfer(
+            &keypair.pubkey(),
+            tip_recipient,
+            tip_amount,
+        );
+        
+        let message = Message::new(
+            &[tip_instruction],
+            Some(&keypair.pubkey()),
+        );
+        
+        let blockhash = Hash::from_str(blockhash)
+            .map_err(|e| format!("Invalid blockhash: {}", e))?;
+        
+        let transaction = Transaction::new(
+            &[&keypair],
+            message,
+            blockhash,
+        );
+        
+        let serialized_tx = bincode::serialize(&transaction)
+            .map_err(|e| format!("Failed to serialize tip transaction: {}", e))?;
+        
+        let encoded_tx = bs58::encode(serialized_tx).into_string();
+        
+        Logger::status_update(&format!("Tip transaction created with length: {}", encoded_tx.len()));
+        
+        Ok(encoded_tx)
     }
 
     async fn send_transaction(&self, transaction_data: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {

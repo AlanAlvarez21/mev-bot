@@ -6,6 +6,7 @@ Bot de extracción de valor máximo (MEV) para la red Solana, diseñado para det
 
 - ⚡ **Detección en tiempo real**: Monitorea el mempool de Solana para identificar oportunidades MEV
 - 🚀 **Integración con Jito**: Envia transacciones con prioridad para mayor éxito en frontrun
+- 💰 **Transacciones con propina (tip)**: Incluye transacciones de propina a cuentas de Jito para ser elegible en subastas
 - 🔒 **Firmado de transacciones**: Creación de transacciones firmadas con clave privada
 - 💰 **Cálculo de rentabilidad**: Evalúa oportunidades para evitar pérdidas
 - 🛡️ **Manejo robusto de errores**: Sistema completo de gestión de fallos
@@ -53,8 +54,9 @@ SOLANA_WS_URL=wss://api.devnet.solana.com    # Cambia a mainnet si corres en mai
 USE_JITO=true
 JITO_RPC_URL=https://testnet.block-engine.jito.wtf/api/v1/bundles
 
-# Cuentas de tip recomendadas por Jito (para Devnet)
-JITO_TIP_ACCOUNT=96gYZGLnJYVFJZpLUWK4JGsRU1uKiuN5Mjfn4xh3F933
+# Cuentas de tip recomendadas por Jito (para Devnet) - No es necesario configurar manualmente
+# El bot selecciona automáticamente una cuenta de tip para cumplir con los requisitos de Jito
+# JITO_TIP_ACCOUNT=96gYZGLnJYVFJZpLUWK4JGsRU1uKiuN5Mjfn4xh3F933
 
 # Estrategias MEV para Solana
 STRATEGY=frontrun,snipe
@@ -118,7 +120,6 @@ Después de obtener acceso, actualiza tu `.env`:
 NETWORK=mainnet
 USE_JITO=true
 JITO_RPC_URL=https://mainnet.block-engine.jito.wtf/api/v1/bundles
-JITO_TIP_ACCOUNT=96gYZGLnJYVFJZpLUWK4JGsRU1uKiuN5Mjfn4xh3F933
 JITO_AUTH_HEADER=Bearer tu_uuid_real_aqui
 ```
 
@@ -137,6 +138,10 @@ JITO_TIP_ACCOUNT=96gYZGLnJYVFJZpLUWK4JGsRU1uKiuN5Mjfn4xh3F933
 # DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL
 # 3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT
 ```
+
+### 4. Importante: Funcionalidad de propina (tip) implementada
+
+El bot ahora incluye automáticamente transacciones de propina (tip) en los bundles de Jito para cumplir con los requisitos de elegibilidad para la subasta de Jito. El bot selecciona aleatoriamente una de las cuentas de propina conocidas de Jito para cada bundle que envía.
 
 ## Consideraciones de seguridad para Mainnet
 

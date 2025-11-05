@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
     }
 
     // Espera indefinida (bot corre forever)
-    println!("{} Press Ctrl+C to stop", "🎬".cyan());
+    println!("{} Press Ctrl+C to stop", "".cyan());
     tokio::signal::ctrl_c().await?;
     Logger::shutdown();
     Ok(())

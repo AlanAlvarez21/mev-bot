@@ -6,7 +6,7 @@ pub struct Logger;
 impl Logger {
     pub fn startup(network: &str, strategies: &str) {
         println!("{}", "=".repeat(60).blue());
-        println!("{} {}", "🤖 MEV Bot".bold().green(), "v0.1.0".dimmed());
+        println!("{} {}", "Solana MEV Bot".bold().green(), "v0.1.0".dimmed());
         println!("{}", "=".repeat(60).blue());
         println!("{} {}", "Network:".bold().yellow(), network);
         println!("{} {}", "Strategies:".bold().yellow(), strategies);
@@ -15,11 +15,11 @@ impl Logger {
     }
 
     pub fn eth_monitor_start() {
-        println!("{} {}", "🔗".cyan(), "Ethereum mempool monitor started".cyan());
+        println!("{} {}", "".cyan(), "Ethereum mempool monitor started".cyan());
     }
 
     pub fn solana_monitor_start() {
-        println!("{} {}", "🔗".cyan(), "Solana mempool monitor started".cyan());
+        println!("{} {}", "".cyan(), "Solana mempool monitor started".cyan());
     }
 
     pub fn opportunity_detected(chain: &str, tx_hash: &str) {
@@ -28,7 +28,7 @@ impl Logger {
 
     pub fn bundle_sent(chain: &str, success: bool) {
         if success {
-            println!("{} {} {}", "📦".green(), "BUNDLE SENT".green().bold(), format!("on {}", chain).dimmed());
+            println!("{} {} {}", "".green(), "BUNDLE SENT".green().bold(), format!("on {}", chain).dimmed());
         } else {
             println!("{} {} {}", "❌".red(), "BUNDLE FAILED".red().bold(), format!("on {}", chain).dimmed());
         }
@@ -39,7 +39,7 @@ impl Logger {
     }
 
     pub fn status_update(status: &str) {
-        println!("{} {}", "📊".blue(), status);
+        println!("{} {}", "".blue(), status);
     }
 
     pub fn shutdown() {

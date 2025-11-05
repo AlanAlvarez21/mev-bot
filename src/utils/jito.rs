@@ -1,10 +1,13 @@
 use reqwest;
 use serde_json::{json, Value};
+use solana_sdk::pubkey::Pubkey;
 
 pub struct JitoClient {
     client: reqwest::Client,
     jito_rpc_url: String,
     auth_header: Option<String>,
+    // Jito tip accounts (these are the public keys of the tip accounts)
+    tip_accounts: Vec<Pubkey>,
 }
 
 impl JitoClient {
@@ -14,10 +17,21 @@ impl JitoClient {
         // La autenticación para Jito normalmente requiere credenciales
         let auth_header = std::env::var("JITO_AUTH_HEADER").ok();
         
+        // Jito tip accounts - these are the official tip account addresses
+        // These should work for both mainnet and devnet
+        let tip_accounts = vec![
+            "96gYZGLnJYVFvJJvLL1JUH6ZVx5AZPfC4DW4wxPqZDAx".parse().unwrap(), // Main tip account
+            "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY".parse().unwrap(), // Alternative tip account
+            "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh".parse().unwrap(), // Alternative tip account
+            "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49".parse().unwrap(), // Alternative tip account
+            "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt".parse().unwrap(), // Alternative tip account
+        ];
+        
         Some(Self {
             client: reqwest::Client::new(),
             jito_rpc_url,
             auth_header,
+            tip_accounts,
         })
     }
 
@@ -47,5 +61,16 @@ impl JitoClient {
         } else {
             Err("Failed to parse Jito response".into())
         }
+    }
+
+    pub fn get_tip_accounts(&self) -> &Vec<Pubkey> {
+        &self.tip_accounts
+    }
+    
+    pub fn get_random_tip_account(&self) -> &Pubkey {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        let index = rng.gen_range(0..self.tip_accounts.len());
+        &self.tip_accounts[index]
     }
 }
