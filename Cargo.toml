@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Ethereum
-ethers = { version = "=2.0.14", features = ["ws", "rustls"] }
+ethers = { version = "2.0.14", features = ["ws", "rustls"] }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1.0", features = ["derive"] }
@@ -25,8 +25,8 @@ colored = "2.0"
 # Utilities
 rand = "0.8"
 
-# Solana (commented out due to dependency conflicts)
-# solana-client = "1.17"
-# solana-sdk = "1.17"
-# solana-transaction-status = "1.17"
+# HTTP client for connecting to Solana RPC
+reqwest = { version = "0.11", features = ["json"] }
+tokio-tungstenite = "0.20"
+url = "2.0"
 

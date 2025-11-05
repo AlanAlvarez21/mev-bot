@@ -13,9 +13,19 @@ use rust_mev_hybrid_bot::mempool::solana::SolanaMempool;
 async fn main() -> Result<()> {
     dotenv().ok();
     
-    let testnet = env::var("TESTNET").unwrap_or_else(|_| "true".to_string()) == "true";
-    let network = if testnet { Network::Testnet } else { Network::Mainnet };
-    let network_str = if testnet { "TESTNET" } else { "MAINNET" };
+    let network_env = env::var("NETWORK").unwrap_or_else(|_| "devnet".to_string()).to_lowercase();
+    let network = match network_env.as_str() {
+        "mainnet" => Network::Mainnet,
+        "testnet" => Network::Testnet,
+        "devnet" => Network::Devnet,
+        _ => Network::Devnet, // Default to devnet
+    };
+    
+    let network_str = match network {
+        Network::Mainnet => "MAINNET",
+        Network::Testnet => "TESTNET", 
+        Network::Devnet => "DEVNET",
+    };
     
     let strategy = env::var("STRATEGY").unwrap_or_else(|_| "sandwich".to_string());
     println!("Debug: Strategy value read from env: {}", strategy);  // Debug line
