@@ -1,7 +1,7 @@
 use crate::logging::Logger;
 use reqwest;
 use serde_json::{json, Value};
-use std::str::FromStr;
+use crate::utils::jito::JitoClient;
 
 pub struct SolanaExecutor {
     client: reqwest::Client,
@@ -54,7 +54,7 @@ impl SolanaExecutor {
         }
     }
 
-    async fn execute_frontrun_with_jito(&self, target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    async fn execute_frontrun_with_jito(&self, _target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Logger::status_update("Preparing Jito bundle for frontrun");
         
         // En una implementación completa, crearíamos una transacción real con tip
@@ -62,14 +62,17 @@ impl SolanaExecutor {
         let recent_blockhash = self.get_recent_blockhash().await?;
         let transaction_data = self.create_signed_transaction(&recent_blockhash)?;
         
-        // Enviar como bundle a través de Jito
-        // Por ahora, simulamos el proceso ya que necesitamos implementar la lógica de creación real de transacciones
-        Logger::status_update("Sending transaction via Jito RPC");
-        let signature = self.send_transaction(&transaction_data).await?; // Usamos el método estándar por ahora
-        
-        Logger::status_update(&format!("Frontrun transaction sent via Jito: {}", signature));
-        
-        Ok(signature)
+        // Usar Jito para enviar el bundle si está disponible
+        match JitoClient::new() {
+            Some(jito_client) => {
+                Logger::status_update("Sending bundle via Jito");
+                jito_client.send_bundle(&[transaction_data]).await
+            }
+            None => {
+                Logger::status_update("Jito not configured, falling back to standard RPC");
+                self.send_transaction(&transaction_data).await
+            }
+        }
     }
 
     async fn get_recent_blockhash(&self) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
