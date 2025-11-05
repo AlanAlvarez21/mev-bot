@@ -6,6 +6,7 @@ use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use futures_util::{SinkExt, StreamExt};
 use futures::StreamExt as FuturesStreamExt;
 use crate::executor::solana_executor::SolanaExecutor;
+use crate::utils::profitability_calculator::{ProfitabilityCalculator, OpportunityAnalysis};
 
 pub struct SolanaMempool {
     client: reqwest::Client,
@@ -127,16 +128,58 @@ impl SolanaMempool {
         // for potential MEV opportunities like swaps, arbitrage, etc.
         Logger::opportunity_detected("Solana", signature);
         
-        // Execute frontrun strategy based on detected opportunity
-        match executor.execute_frontrun(signature).await {
-            Ok(exec_signature) => {
-                Logger::bundle_sent("Solana", true);
-                Logger::status_update(&format!("Frontrun executed for transaction {}: {}", signature, exec_signature));
+        // Calculate if the opportunity is profitable before executing
+        let opportunity_analysis = self.estimate_profitability(signature).await;
+        
+        if ProfitabilityCalculator::should_execute(&opportunity_analysis) {
+            // Execute frontrun strategy based on detected opportunity
+            match executor.execute_frontrun(signature).await {
+                Ok(exec_signature) => {
+                    Logger::bundle_sent("Solana", true);
+                    Logger::status_update(&format!("Frontrun executed for transaction {}: {}", signature, exec_signature));
+                }
+                Err(e) => {
+                    Logger::error_occurred(&format!("Frontrun failed for transaction {}: {}", signature, e));
+                }
             }
-            Err(e) => {
-                Logger::error_occurred(&format!("Frontrun failed for transaction {}: {}", signature, e));
-            }
+        } else {
+            Logger::status_update(&format!("Skipping unprofitable opportunity: {}", signature));
         }
+    }
+    
+    async fn estimate_profitability(&self, signature: &str) -> OpportunityAnalysis {
+        // En una implementación real, analizaríamos la transacción específica
+        // para estimar el potencial de beneficio
+        // Por ahora, simulamos el análisis basado en el hash de la transacción
+        
+        Logger::status_update(&format!("Analyzing profitability for transaction: {}", signature));
+        
+        // Simular el análisis de la transacción para estimar beneficios
+        // En una implementación real, esto leería los datos de la transacción
+        let fees = 0.005; // 0.005 SOL en fees promedio (taxas + Jito tips)
+        
+        // Simular el cálculo de potencial de beneficio basado en el hash
+        let hash_numeric = self.signature_to_numeric(signature);
+        let potential_profit = (hash_numeric % 10000) as f64 / 100000.0; // Convertir a SOL (0.0000 a 0.0999 SOL)
+        
+        // Asegurar un mínimo de beneficio potencial
+        let potential_profit = potential_profit.max(0.001); // Mínimo 0.001 SOL
+        
+        Logger::status_update(&format!("Estimated profit potential: {:.6} SOL", potential_profit));
+        
+        ProfitabilityCalculator::analyze_frontrun(0.0, potential_profit, fees)
+    }
+    
+    fn signature_to_numeric(&self, signature: &str) -> u64 {
+        // Convertir parte del string de la firma a un número para simulación
+        let cleaned = signature.chars().take(16).collect::<String>();
+        let mut result = 0u64;
+        
+        for c in cleaned.chars() {
+            result = result.wrapping_add(c as u64).wrapping_mul(31);
+        }
+        
+        result
     }
 
     // Fallback method using slot monitoring

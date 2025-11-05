@@ -2,6 +2,7 @@ use crate::logging::Logger;
 use reqwest;
 use serde_json::{json, Value};
 use crate::utils::jito::JitoClient;
+use crate::utils::profit_calculator::{ProfitCalculator, OpportunityAnalysis};
 
 pub struct SolanaExecutor {
     client: reqwest::Client,
@@ -9,6 +10,7 @@ pub struct SolanaExecutor {
     rpc_url: String,
     ws_url: String,
     use_jito: bool,
+    profit_calculator: ProfitCalculator,
 }
 
 impl SolanaExecutor {
@@ -27,14 +29,38 @@ impl SolanaExecutor {
         Ok(Self {
             client: reqwest::Client::new(),
             keypair_data,
-            rpc_url,
-            ws_url,
-            use_jito,
+            rpc_url: rpc_url,
+            ws_url: ws_url,
+            use_jito: use_jito,
+            profit_calculator: ProfitCalculator::new(),
         })
     }
 
     pub async fn execute_frontrun(&self, target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Logger::status_update(&format!("Attempting to frontrun transaction: {}", target_tx_signature));
+        
+        // Calcular la rentabilidad antes de intentar el frontrun
+        let estimated_profit = self.estimate_profit_from_target(target_tx_signature)?;
+        let fees = self.calculate_transaction_fees().await?;
+        let tip_amount = if self.use_jito { 0.001 } else { 0.0 }; // 0.001 SOL como propina para Jito
+        
+        let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
+        
+        if !analysis.is_profitable {
+            Logger::status_update(&format!(
+                "Skipping unprofitable opportunity: net profit {:.6} SOL vs minimum required {:.6} SOL", 
+                analysis.net_profit, 
+                estimated_profit * self.profit_calculator.min_profit_margin
+            ));
+            return Err("Opportunity not profitable".into());
+        }
+        
+        Logger::status_update(&format!(
+            "Profitable opportunity: estimated profit {:.6} SOL, fees {:.6} SOL, net profit {:.6} SOL",
+            analysis.estimated_profit,
+            analysis.total_costs,
+            analysis.net_profit
+        ));
         
         if self.use_jito {
             Logger::status_update("Using Jito for transaction priority");
@@ -102,6 +128,20 @@ impl SolanaExecutor {
         } else {
             Err("Failed to parse blockhash result".into())
         }
+    }
+
+    async fn calculate_transaction_fees(&self) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+        // Obtener el costo actual de las transacciones de la red
+        // En una implementación completa, consultaríamos el estado actual de la red
+        // Por ahora, retornamos un valor estimado basado en condiciones típicas de la red
+        Ok(0.005) // 0.005 SOL como tarifa base promedio
+    }
+
+    fn estimate_profit_from_target(&self, target_tx_signature: &str) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+        // En una implementación real, analizaríamos la transacción objetivo para estimar beneficios
+        // Por ahora, usamos una estimación basada en el hash de la transacción
+        let profit_estimate = ((target_tx_signature.len() % 10000) as f64 / 100000.0) + 0.01; // Valor entre 0.01 - 0.1 SOL
+        Ok(profit_estimate)
     }
 
     fn create_signed_transaction(&self, _blockhash: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
