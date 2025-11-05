@@ -23,8 +23,7 @@ colored = "2.0"
 rand = "0.8"
 
 # HTTP client for connecting to Solana RPC
-reqwest = { version = "0.11", features = ["json"] }
-tokio-tungstenite = "0.20"
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
 url = "2.0"
 
 # WebSocket utilities
@@ -33,4 +32,7 @@ futures-util = "0.3"
 # Base58 encoding for Solana transactions
 bs58 = "0.4"
 bincode = "1.3"
+
+# TLS support for secure WebSocket connections
+tokio-tungstenite = { version = "0.20.1", features = ["rustls-tls-native-roots"] }
 
