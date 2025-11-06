@@ -16,7 +16,7 @@ pub struct TransactionSimulator {
 }
 
 impl TransactionSimulator {
-    pub fn new(rpc_url: String) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(rpc_url: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let rpc_client = Arc::new(RpcClient::new(rpc_url));
         Ok(Self { rpc_client })
     }

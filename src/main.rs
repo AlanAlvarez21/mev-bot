@@ -12,6 +12,9 @@ use rust_mev_hybrid_bot::mempool::solana::SolanaMempool;
 async fn main() -> Result<()> {
     dotenv().ok();
     
+    // NEW ARCHITECTURE: Validate required environment variables
+    validate_environment_variables()?;
+    
     let network_env = env::var("NETWORK").unwrap_or_else(|_| "devnet".to_string()).to_lowercase();
     let network = match network_env.as_str() {
         "mainnet" => Network::Mainnet,
@@ -47,5 +50,26 @@ async fn main() -> Result<()> {
     println!("{} Press Ctrl+C to stop", "".cyan());
     tokio::signal::ctrl_c().await?;
     Logger::shutdown();
+    Ok(())
+}
+
+fn validate_environment_variables() -> Result<()> {
+    // NEW ARCHITECTURE: Check that all required environment variables are set
+    let required_vars = vec![
+        "HELIUS",      // For read/simulation calls
+        "JITO_RPC_URL", // For execution
+        "JITO_TIP_ACCOUNT", // For Jito tips
+        "DRPC",        // Fallback RPC
+    ];
+    
+    for var in required_vars {
+        if std::env::var(var).is_err() {
+            eprintln!("ERROR: Environment variable {} is not set", var);
+            eprintln!("Please check your .env file and ensure all required variables are present");
+            std::process::exit(1);
+        }
+    }
+    
+    println!("All required environment variables are present");
     Ok(())
 }

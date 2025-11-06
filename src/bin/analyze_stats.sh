@@ -6,7 +6,7 @@ LOG_FILE=$1
 if [ -z "$LOG_FILE" ]; then
     echo "Uso: $0 <archivo_log>"
     echo "O para analizar el último log:"
-    echo "  $0 \$(ls -t logs/mev_bot_*.log | head -n1)"
+    echo "  $0 \$(ls -t ../../logs/mev_bot_*.log | head -n1)"
     exit 1
 fi
 

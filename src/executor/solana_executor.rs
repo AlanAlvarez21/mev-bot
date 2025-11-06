@@ -304,7 +304,6 @@ impl SolanaExecutor {
                 Ok(hash) => hash,
                 Err(e) => {
                     Logger::error_occurred(&format!("Failed to get recent blockhash: {}", e));
-                    self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
                     return Err(e);
                 }
             };
@@ -313,7 +312,6 @@ impl SolanaExecutor {
                 Ok(data) => data,
                 Err(e) => {
                     Logger::error_occurred(&format!("Failed to create MEV strategy transaction: {}", e));
-                    self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
                     return Err(e);
                 }
             };
@@ -327,7 +325,6 @@ impl SolanaExecutor {
                 },
                 Err(e) => {
                     Logger::error_occurred(&format!("Failed to send frontrun transaction: {}", e));
-                    self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
                     Err(e)
                 }
             }
@@ -351,6 +348,8 @@ impl SolanaExecutor {
         
         result
     }
+    
+
 
     async fn execute_frontrun_with_jito(&self, _target_tx_signature: &str, target_tx_details: Option<&Value>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Logger::status_update("Preparing Jito bundle for frontrun");
@@ -818,64 +817,95 @@ impl SolanaExecutor {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Logger::status_update(&format!("Attempting to execute sandwich for transaction: {}, with estimated profit: {:.6} SOL", target_tx_signature, estimated_profit));
         
+        let start_time = std::time::Instant::now();
+        
+        // NEW ARCHITECTURE: This functionality should be handled by SolanaMempool
+        // For now, fall back to the original implementation
+        Logger::status_update("Executing sandwich using fallback logic");
+        
+        let start_time = std::time::Instant::now();
+        
         // Verificar si debemos continuar operando según los parámetros de riesgo
         if !self.should_continue_operation().await? {
+            self.record_transaction_analytics("sandwich", false, estimated_profit, 0.005).await;
             return Err("Operation halted due to risk management parameters".into());
         }
         
-        let fees = self.calculate_transaction_fees().await?;
+        let fees_result = self.calculate_transaction_fees().await;
+        let fees = match fees_result {
+            Ok(fee_value) => fee_value,
+            Err(e) => {
+                let error_msg = format!("Failed to calculate transaction fees: {}", e);
+                Logger::error_occurred(&error_msg);
+                self.record_transaction_analytics("sandwich", false, -0.005, 0.005).await; // Use default fees value
+                return Err(e);
+            }
+        };
+        
         let tip_amount = if self.use_jito { 0.001 } else { 0.0 }; // 0.001 SOL como propina para Jito
+        let total_cost = fees + tip_amount;
+        
+        // Check with risk manager if this transaction should be allowed
+        if !self.risk_manager.should_allow_transaction(estimated_profit, total_cost) {
+            Logger::status_update("Transaction rejected by risk manager");
+            self.record_transaction_analytics("sandwich", false, -total_cost, total_cost).await;
+            return Err("Transaction rejected by risk manager".into());
+        }
+        
+        let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
         
         // Additional safety check: prevent execution if estimated profit is non-positive
         if estimated_profit <= 0.0 {
             Logger::status_update(&format!(
-                "Skipping sandwich opportunity with no positive profit potential: estimated profit {:.6} SOL", 
+                "Skipping opportunity with no positive profit potential: estimated profit {:.6} SOL", 
                 estimated_profit
             ));
+            self.record_transaction_analytics("sandwich", false, -total_cost, total_cost).await;
             return Err("No positive profit potential".into());
         }
         
         // Run additional safety checks
         let safety_ok = self.additional_safety_checks(estimated_profit, fees, tip_amount).await?;
         if !safety_ok {
-            Logger::status_update("Skipping sandwich opportunity: failed additional safety checks");
+            Logger::status_update("Skipping opportunity: failed additional safety checks");
+            self.record_transaction_analytics("sandwich", false, -total_cost, total_cost).await;
             return Err("Failed additional safety checks".into());
         }
         
-        let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
-        
+        // Verificar límites de riesgo adicionales
         if !analysis.is_profitable {
             Logger::status_update(&format!(
-                "Skipping unprofitable sandwich opportunity: net profit {:.6} SOL", 
-                analysis.net_profit
+                "Skipping unprofitable opportunity: net profit {:.6} SOL vs minimum required {:.6} SOL", 
+                analysis.net_profit, 
+                estimated_profit * self.profit_calculator.min_profit_margin
             ));
-            return Err("Sandwich opportunity not profitable".into());
+            self.record_transaction_analytics("sandwich", false, -total_cost, total_cost).await;
+            return Err("Opportunity not profitable".into());
         }
         
         // Verificar que el potencial de pérdida no exceda el límite configurado
         if analysis.net_profit < -self.max_loss_per_bundle {
             Logger::status_update(&format!(
-                "Skipping high-risk sandwich opportunity: potential loss {:.6} SOL exceeds max allowed loss {:.6} SOL", 
+                "Skipping high-risk opportunity: potential loss {:.6} SOL exceeds max allowed loss {:.6} SOL", 
                 -analysis.net_profit, 
                 self.max_loss_per_bundle
             ));
-            return Err("Sandwich opportunity exceeds maximum allowed loss".into());
+            self.record_transaction_analytics("sandwich", false, -total_cost, total_cost).await;
+            return Err("Opportunity exceeds maximum allowed loss".into());
         }
         
         Logger::status_update(&format!(
-            "Profitable sandwich opportunity: estimated profit {:.6} SOL, fees {:.6} SOL, net profit {:.6} SOL",
+            "Profitable opportunity: estimated profit {:.6} SOL, fees {:.6} SOL, net profit {:.6} SOL",
             analysis.estimated_profit,
             analysis.total_costs,
             analysis.net_profit
         ));
         
-        // Actualmente, implementamos como frontrun, pero en una implementación completa
-        // se requerirían múltiples transacciones coordinadas
         let result = if self.use_jito {
-            Logger::status_update("Using Jito for sandwich transaction priority");
+            Logger::status_update("Using Jito for transaction priority");
             self.execute_sandwich_with_jito(target_tx_signature, target_tx_details).await
         } else {
-            Logger::status_update("Using standard RPC for sandwich transaction");
+            Logger::status_update("Using standard RPC for transaction");
             // Crear una transacción firmada basada en estrategia MEV
             let recent_blockhash_result = self.get_recent_blockhash().await;
             let recent_blockhash = match recent_blockhash_result {
@@ -909,12 +939,18 @@ impl SolanaExecutor {
         };
         
         // Registrar resultados de la ejecución
+        let execution_time = start_time.elapsed().as_millis() as f64;
         match &result {
             Ok(signature) => {
                 Logger::status_update(&format!("Sandwich successful: {}", signature));
+                // Record success in analytics
+                self.record_transaction_analytics("sandwich", true, estimated_profit - total_cost, total_cost).await;
+                self.record_opportunity_analytics("sandwich", true, true, estimated_profit, execution_time).await;
             },
             Err(e) => {
                 Logger::error_occurred(&format!("Sandwich failed: {}", e));
+                self.record_transaction_analytics("sandwich", false, -total_cost, total_cost).await;
+                self.record_opportunity_analytics("sandwich", true, false, -total_cost, execution_time).await;
             }
         };
         
@@ -994,64 +1030,95 @@ impl SolanaExecutor {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Logger::status_update(&format!("Attempting to execute arbitrage for transaction: {}, with estimated profit: {:.6} SOL", target_tx_signature, estimated_profit));
         
+        let start_time = std::time::Instant::now();
+        
+        // NEW ARCHITECTURE: This functionality should be handled by SolanaMempool
+        // For now, fall back to the original implementation
+        Logger::status_update("Executing arbitrage using fallback logic");
+        
+        let start_time = std::time::Instant::now();
+        
         // Verificar si debemos continuar operando según los parámetros de riesgo
         if !self.should_continue_operation().await? {
+            self.record_transaction_analytics("arbitrage", false, estimated_profit, 0.005).await;
             return Err("Operation halted due to risk management parameters".into());
         }
         
-        let fees = self.calculate_transaction_fees().await?;
+        let fees_result = self.calculate_transaction_fees().await;
+        let fees = match fees_result {
+            Ok(fee_value) => fee_value,
+            Err(e) => {
+                let error_msg = format!("Failed to calculate transaction fees: {}", e);
+                Logger::error_occurred(&error_msg);
+                self.record_transaction_analytics("arbitrage", false, -0.005, 0.005).await; // Use default fees value
+                return Err(e);
+            }
+        };
+        
         let tip_amount = if self.use_jito { 0.001 } else { 0.0 }; // 0.001 SOL como propina para Jito
+        let total_cost = fees + tip_amount;
+        
+        // Check with risk manager if this transaction should be allowed
+        if !self.risk_manager.should_allow_transaction(estimated_profit, total_cost) {
+            Logger::status_update("Transaction rejected by risk manager");
+            self.record_transaction_analytics("arbitrage", false, -total_cost, total_cost).await;
+            return Err("Transaction rejected by risk manager".into());
+        }
+        
+        let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
         
         // Additional safety check: prevent execution if estimated profit is non-positive
         if estimated_profit <= 0.0 {
             Logger::status_update(&format!(
-                "Skipping arbitrage opportunity with no positive profit potential: estimated profit {:.6} SOL", 
+                "Skipping opportunity with no positive profit potential: estimated profit {:.6} SOL", 
                 estimated_profit
             ));
+            self.record_transaction_analytics("arbitrage", false, -total_cost, total_cost).await;
             return Err("No positive profit potential".into());
         }
         
         // Run additional safety checks
         let safety_ok = self.additional_safety_checks(estimated_profit, fees, tip_amount).await?;
         if !safety_ok {
-            Logger::status_update("Skipping arbitrage opportunity: failed additional safety checks");
+            Logger::status_update("Skipping opportunity: failed additional safety checks");
+            self.record_transaction_analytics("arbitrage", false, -total_cost, total_cost).await;
             return Err("Failed additional safety checks".into());
         }
         
-        let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
-        
+        // Verificar límites de riesgo adicionales
         if !analysis.is_profitable {
             Logger::status_update(&format!(
-                "Skipping unprofitable arbitrage opportunity: net profit {:.6} SOL", 
-                analysis.net_profit
+                "Skipping unprofitable opportunity: net profit {:.6} SOL vs minimum required {:.6} SOL", 
+                analysis.net_profit, 
+                estimated_profit * self.profit_calculator.min_profit_margin
             ));
-            return Err("Arbitrage opportunity not profitable".into());
+            self.record_transaction_analytics("arbitrage", false, -total_cost, total_cost).await;
+            return Err("Opportunity not profitable".into());
         }
         
         // Verificar que el potencial de pérdida no exceda el límite configurado
         if analysis.net_profit < -self.max_loss_per_bundle {
             Logger::status_update(&format!(
-                "Skipping high-risk arbitrage opportunity: potential loss {:.6} SOL exceeds max allowed loss {:.6} SOL", 
+                "Skipping high-risk opportunity: potential loss {:.6} SOL exceeds max allowed loss {:.6} SOL", 
                 -analysis.net_profit, 
                 self.max_loss_per_bundle
             ));
-            return Err("Arbitrage opportunity exceeds maximum allowed loss".into());
+            self.record_transaction_analytics("arbitrage", false, -total_cost, total_cost).await;
+            return Err("Opportunity exceeds maximum allowed loss".into());
         }
         
         Logger::status_update(&format!(
-            "Profitable arbitrage opportunity: estimated profit {:.6} SOL, fees {:.6} SOL, net profit {:.6} SOL",
+            "Profitable opportunity: estimated profit {:.6} SOL, fees {:.6} SOL, net profit {:.6} SOL",
             analysis.estimated_profit,
             analysis.total_costs,
             analysis.net_profit
         ));
         
-        // Actualmente, implementamos como frontrun, pero en una implementación completa
-        // se requerirían múltiples operaciones coordinadas
         let result = if self.use_jito {
-            Logger::status_update("Using Jito for arbitrage transaction priority");
+            Logger::status_update("Using Jito for transaction priority");
             self.execute_arbitrage_with_jito(target_tx_signature, target_tx_details).await
         } else {
-            Logger::status_update("Using standard RPC for arbitrage transaction");
+            Logger::status_update("Using standard RPC for transaction");
             // Crear una transacción firmada basada en estrategia MEV
             let recent_blockhash_result = self.get_recent_blockhash().await;
             let recent_blockhash = match recent_blockhash_result {
@@ -1085,12 +1152,18 @@ impl SolanaExecutor {
         };
         
         // Registrar resultados de la ejecución
+        let execution_time = start_time.elapsed().as_millis() as f64;
         match &result {
             Ok(signature) => {
                 Logger::status_update(&format!("Arbitrage successful: {}", signature));
+                // Record success in analytics
+                self.record_transaction_analytics("arbitrage", true, estimated_profit - total_cost, total_cost).await;
+                self.record_opportunity_analytics("arbitrage", true, true, estimated_profit, execution_time).await;
             },
             Err(e) => {
                 Logger::error_occurred(&format!("Arbitrage failed: {}", e));
+                self.record_transaction_analytics("arbitrage", false, -total_cost, total_cost).await;
+                self.record_opportunity_analytics("arbitrage", true, false, -total_cost, execution_time).await;
             }
         };
         

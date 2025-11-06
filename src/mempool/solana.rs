@@ -13,6 +13,16 @@ use crate::utils::profitability_calculator::OpportunityAnalysis;
 use crate::utils::dex_monitor::DEXMonitor;
 use crate::utils::dex_api::DexApi;
 use crate::utils::transaction_simulator::TransactionSimulator;
+use crate::rpc::rpc_manager::RpcManager;
+use crate::utils::opportunity_evaluator::OpportunityEvaluator;
+use crate::utils::enhanced_transaction_simulator::EnhancedTransactionSimulator;
+use crate::utils::mev_simulation_pipeline::MevSimulationPipeline;
+use crate::utils::fee_calculator::FeeCalculator;
+use crate::utils::false_positive_reducer::FalsePositiveReducer;
+use crate::utils::jito_optimizer::JitoOptimizer;
+use crate::utils::mev_strategies::MevStrategyExecutor;
+use crate::utils::metrics_collector::MetricsCollector;
+use crate::utils::risk_controls::RiskManager as NewRiskManager;
 
 #[derive(Clone)]
 pub struct SolanaMempool {
@@ -23,10 +33,22 @@ pub struct SolanaMempool {
     dex_api: Arc<DexApi>,
     dex_monitor: Arc<tokio::sync::RwLock<DEXMonitor>>,
     transaction_simulator: Arc<TransactionSimulator>,
+    
+    // NEW ARCHITECTURE COMPONENTS - Optional until initialized
+    rpc_manager: Option<Arc<RpcManager>>,
+    opportunity_evaluator: Option<Arc<OpportunityEvaluator>>,
+    enhanced_simulator: Option<Arc<EnhancedTransactionSimulator>>,
+    mev_simulation_pipeline: Option<Arc<MevSimulationPipeline>>,
+    fee_calculator: Option<Arc<FeeCalculator>>,
+    false_positive_reducer: Arc<FalsePositiveReducer>,
+    jito_optimizer: Option<Arc<JitoOptimizer>>,
+    mev_strategy_executor: Option<Arc<MevStrategyExecutor>>,
+    metrics_collector: Option<Arc<MetricsCollector>>,
+    new_risk_manager: Option<Arc<NewRiskManager>>,
 }
 
 impl SolanaMempool {
-    pub fn new(network: &Network) -> Self {
+    pub async fn new(network: &Network) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Use devnet RPC endpoint by default
         let rpc_url = match network {
             Network::Devnet => std::env::var("SOLANA_RPC_URL").unwrap_or_else(|_| "https://api.devnet.solana.com".to_string()),
@@ -43,16 +65,36 @@ impl SolanaMempool {
         let dex_api = Arc::new(DexApi::new(rpc_url.clone()));
         let dex_monitor = Arc::new(tokio::sync::RwLock::new(DEXMonitor::new()));
         
-        let transaction_simulator = Arc::new(match TransactionSimulator::new(rpc_url.clone()) {
-            Ok(sim) => sim,
-            Err(e) => {
-                Logger::error_occurred(&format!("Failed to create transaction simulator: {}", e));
-                // Create a dummy simulator to avoid crashing
-                TransactionSimulator::new("https://api.devnet.solana.com".to_string()).unwrap()
-            }
-        });
+        let transaction_simulator = Arc::new(TransactionSimulator::new(rpc_url.clone())?);
 
-        Self {
+        // NEW ARCHITECTURE - initialize with proper initialization
+        let rpc_manager = Arc::new(RpcManager::new().await?);
+        
+        let opportunity_evaluator = Arc::new(OpportunityEvaluator::new(rpc_manager.clone()).await?);
+        
+        let enhanced_simulator = Arc::new(EnhancedTransactionSimulator::new(rpc_manager.clone()).await?);
+        
+        let mev_simulation_pipeline = Arc::new(MevSimulationPipeline::new(rpc_manager.clone()).await?);
+        
+        let fee_calculator = Arc::new(FeeCalculator::new(rpc_manager.clone()).await?);
+        
+        let jito_optimizer = Arc::new(JitoOptimizer::new(rpc_manager.clone()).await?);
+        
+        let metrics_collector = Arc::new(MetricsCollector::new()?);
+        
+        let new_risk_manager = Arc::new(NewRiskManager::new()?);
+        
+        let mev_strategy_executor = Arc::new(MevStrategyExecutor::new(
+            rpc_manager.clone(),
+            jito_optimizer.clone(),
+            fee_calculator.clone(),
+            opportunity_evaluator.clone(),
+            mev_simulation_pipeline.clone(),
+        ).await?);
+        
+        let false_positive_reducer = Arc::new(FalsePositiveReducer::new());
+
+        Ok(Self {
             client: Arc::new(reqwest::Client::new()),
             rpc_url,
             ws_url,
@@ -60,7 +102,19 @@ impl SolanaMempool {
             dex_api,
             dex_monitor,
             transaction_simulator,
-        }
+            
+            // NEW ARCHITECTURE COMPONENTS
+            rpc_manager: Some(rpc_manager),
+            opportunity_evaluator: Some(opportunity_evaluator),
+            enhanced_simulator: Some(enhanced_simulator),
+            mev_simulation_pipeline: Some(mev_simulation_pipeline),
+            fee_calculator: Some(fee_calculator),
+            false_positive_reducer,
+            jito_optimizer: Some(jito_optimizer),
+            mev_strategy_executor: Some(mev_strategy_executor),
+            metrics_collector: Some(metrics_collector),
+            new_risk_manager: Some(new_risk_manager),
+        })
     }
 
     pub async fn start(&self) {
@@ -221,8 +275,12 @@ impl SolanaMempool {
     }
 
     async fn analyze_and_execute_opportunity(&self, executor: &SolanaExecutor, signature: &str) {
-        // Get strategy from environment variable
-        let strategy = env::var("STRATEGY").unwrap_or_else(|_| "arbitrage".to_string());
+        // NEW ARCHITECTURE: Use the new opportunity evaluator to analyze transaction
+        // Check if new architecture is properly initialized
+        if self.rpc_manager.is_none() {
+            Logger::status_update("New architecture not initialized for mempool");
+            return;
+        }
         
         Logger::opportunity_detected("Solana", signature);
         
@@ -237,66 +295,77 @@ impl SolanaMempool {
         
         let target_tx_details = target_tx_details.unwrap();
         
-        // Analyze the transaction for specific MEV opportunities
-        let opportunity_type = self.classify_transaction_opportunity(target_tx_details).await;
-        
-        match opportunity_type {
-            OpportunityType::Arbitrage => {
-                if strategy.contains("arbitrage") {
-                    let arb_result = self.execute_arbitrage_strategy(executor, signature, target_tx_details).await;
-                    match arb_result {
-                        Ok(exec_signature) => {
-                            Logger::bundle_sent("Solana", true);
-                            Logger::status_update(&format!("Arbitrage executed for transaction {}: {}", signature, exec_signature));
-                        }
+        // NEW ARCHITECTURE: Evaluate the opportunity using the new evaluator
+        if let Some(ref evaluator) = self.opportunity_evaluator {
+            if let Some(opportunity) = evaluator.evaluate_opportunity(target_tx_details).await.ok().flatten() {
+                // NEW ARCHITECTURE: Run enhanced simulation to validate opportunity
+                if let Some(ref simulator) = self.enhanced_simulator {
+                    let simulation_result = match simulator.simulate_and_validate(&opportunity).await {
+                        Ok(result) => result,
                         Err(e) => {
-                            Logger::error_occurred(&format!("Arbitrage failed for transaction {}: {}", signature, e));
+                            Logger::error_occurred(&format!("Failed to simulate opportunity: {}", e));
+                            return;
+                        }
+                    };
+                    
+                    // NEW ARCHITECTURE: Apply false positive reduction
+                    let filtering_result = self.false_positive_reducer.evaluate_opportunity(&opportunity, &simulation_result.simulation_results).await;
+                    
+                    if !filtering_result.should_execute {
+                        Logger::status_update(&format!("Opportunity filtered out by false positive reducer: {}", 
+                                                     filtering_result.filtered_reason.unwrap_or("Unknown reason".to_string())));
+                        return;
+                    }
+                    
+                    // Calculate average confidence from simulation results
+                    let avg_confidence = if !simulation_result.simulation_results.is_empty() {
+                        simulation_result.simulation_results.iter()
+                            .map(|sr| sr.confidence_score)
+                            .sum::<f64>() / simulation_result.simulation_results.len() as f64
+                    } else {
+                        0.0
+                    };
+                    
+                    Logger::status_update(&format!(
+                        "Validated opportunity: type {:?}, estimated profit: {:.6} SOL, confidence: {:.2}%", 
+                        opportunity.opportunity_type, 
+                        opportunity.estimated_profit,
+                        avg_confidence * 100.0
+                    ));
+                    
+                    // NEW ARCHITECTURE: Execute the appropriate strategy based on opportunity type
+                    if let Some(ref strategy_executor) = self.mev_strategy_executor {
+                        let strategy_result = match strategy_executor.execute_strategy(&opportunity, Some(target_tx_details)).await {
+                            Ok(result) => result,
+                            Err(e) => {
+                                Logger::error_occurred(&format!("Strategy execution failed: {}", e));
+                                return;
+                            }
+                        };
+                        
+                        // NEW ARCHITECTURE: Record the execution result
+                        if let Some(ref metrics_collector) = self.metrics_collector {
+                            metrics_collector.record_strategy_execution(&strategy_result).await;
+                        }
+                        
+                        if strategy_result.success {
+                            Logger::bundle_sent("Solana", true);
+                            Logger::status_update(&format!(
+                                "Strategy executed successfully: type {:?}, net profit: {:.6} SOL", 
+                                strategy_result.strategy_type, 
+                                strategy_result.profit
+                            ));
+                        } else {
+                            Logger::status_update(&format!(
+                                "Strategy execution failed: type {:?}, loss: {:.6} SOL", 
+                                strategy_result.strategy_type, 
+                                strategy_result.profit
+                            ));
                         }
                     }
                 }
-            }
-            OpportunityType::Frontrun => {
-                if strategy.contains("frontrun") {
-                    let frontrun_result = self.execute_frontrun_strategy(executor, signature, target_tx_details).await;
-                    match frontrun_result {
-                        Ok(exec_signature) => {
-                            Logger::bundle_sent("Solana", true);
-                            Logger::status_update(&format!("Frontrun executed for transaction {}: {}", signature, exec_signature));
-                        }
-                        Err(e) => {
-                            Logger::error_occurred(&format!("Frontrun failed for transaction {}: {}", signature, e));
-                        }
-                    }
-                }
-            }
-            OpportunityType::Sandwich => {
-                if strategy.contains("sandwich") {
-                    let sandwich_result = self.execute_sandwich_strategy(executor, signature, target_tx_details).await;
-                    match sandwich_result {
-                        Ok(exec_signature) => {
-                            Logger::bundle_sent("Solana", true);
-                            Logger::status_update(&format!("Sandwich executed for transaction {}: {}", signature, exec_signature));
-                        }
-                        Err(e) => {
-                            Logger::error_occurred(&format!("Sandwich failed for transaction {}: {}", signature, e));
-                        }
-                    }
-                }
-            }
-            OpportunityType::Other => {
-                if strategy.contains("snipe") {
-                    // Default to sniping for unknown transaction types that might be profitable
-                    let snipe_result = self.execute_snipe_strategy(executor, signature, target_tx_details).await;
-                    match snipe_result {
-                        Ok(exec_signature) => {
-                            Logger::bundle_sent("Solana", true);
-                            Logger::status_update(&format!("Snipe executed for transaction {}: {}", signature, exec_signature));
-                        }
-                        Err(e) => {
-                            Logger::error_occurred(&format!("Snipe failed for transaction {}: {}", signature, e));
-                        }
-                    }
-                }
+            } else {
+                Logger::status_update(&format!("No profitable opportunity detected for transaction: {}", signature));
             }
         }
     }
