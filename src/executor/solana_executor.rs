@@ -5,11 +5,21 @@ use crate::utils::jito::JitoClient;
 use crate::utils::profit_calculator::ProfitCalculator;
 use solana_sdk::{
     signature::{Keypair, Signer},
+    pubkey::Pubkey,
+    system_instruction,
+    message::Message,
+    transaction::Transaction,
+    hash::Hash,
 };
 use std::str::FromStr;
+use std::sync::Arc;
+use crate::utils::risk_manager::RiskManager;
+use crate::utils::analytics::Analytics;
 
+
+#[derive(Clone)]
 pub struct SolanaExecutor {
-    client: reqwest::Client,
+    client: Arc<reqwest::Client>,
     keypair_data: Vec<u8>,
     rpc_url: String,
     ws_url: String,
@@ -17,6 +27,8 @@ pub struct SolanaExecutor {
     profit_calculator: ProfitCalculator,
     max_loss_per_bundle: f64,  // Máxima pérdida aceptable por bundle
     min_balance: f64,          // Saldo mínimo para continuar operaciones
+    risk_manager: Arc<RiskManager>,  // Wrap in Arc for shared access
+    analytics: Arc<tokio::sync::Mutex<Analytics>>,
 }
 
 impl SolanaExecutor {
@@ -51,8 +63,11 @@ impl SolanaExecutor {
             .parse::<f64>()
             .unwrap_or(0.5);
 
+        let risk_manager = Arc::new(RiskManager::new());
+        let analytics = Arc::new(tokio::sync::Mutex::new(Analytics::new()));
+
         Ok(Self {
-            client: reqwest::Client::new(),
+            client: Arc::new(reqwest::Client::new()),
             keypair_data,
             rpc_url,
             ws_url,
@@ -60,9 +75,24 @@ impl SolanaExecutor {
             profit_calculator: ProfitCalculator::new(),
             max_loss_per_bundle,
             min_balance,
+            risk_manager,
+            analytics,
         })
     }
 
+    // Fix the fees issue in the frontrun function
+    async fn record_transaction_analytics(&self, strategy: &str, success: bool, profit: f64, fees: f64) {
+        let mut analytics = self.analytics.lock().await;
+        analytics.record_transaction(strategy, success, profit, fees);
+    }
+    
+    async fn record_opportunity_analytics(&self, opportunity_type: &str, executed: bool, profitable: bool, profit: f64, execution_time_ms: f64) {
+        let mut analytics = self.analytics.lock().await;
+        analytics.record_opportunity(opportunity_type, executed, profitable, profit, execution_time_ms);
+    }
+} // Close first impl block
+
+impl SolanaExecutor {
     // Método para usar ws_url y keypair_data (eliminar warnings)
     pub fn get_ws_url(&self) -> &str {
         &self.ws_url
@@ -96,6 +126,46 @@ impl SolanaExecutor {
         
         Logger::status_update(&format!("Current balance: {:.6} SOL, minimum required: {:.6} SOL", 
                                      current_balance, self.min_balance));
+        Ok(true)
+    }
+    
+    // Additional risk management checks
+    async fn additional_safety_checks(
+        &self, 
+        estimated_profit: f64, 
+        fees: f64, 
+        tip_amount: f64
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let total_costs = fees + tip_amount;
+        
+        // Check that estimated profit is meaningful (not extremely small)
+        if estimated_profit < 0.001 {
+            Logger::status_update("Skipping opportunity: estimated profit too small (< 0.001 SOL)");
+            return Ok(false);
+        }
+        
+        // Check that net profit is reasonable compared to costs
+        let net_profit = estimated_profit - total_costs;
+        if net_profit <= 0.0 {
+            Logger::status_update("Skipping opportunity: net profit is not positive");
+            return Ok(false);
+        }
+        
+        // Check profit-to-cost ratio
+        if estimated_profit / total_costs < 1.2 { // Require 20% more profit than costs
+            Logger::status_update(&format!(
+                "Skipping opportunity: profit-to-cost ratio too low ({:.2})", 
+                estimated_profit / total_costs
+            ));
+            return Ok(false);
+        }
+        
+        // Additional check for potential slippage or market impact
+        if estimated_profit > 0.5 {  // If potential profit is very high, it might be unrealistic
+            Logger::status_update("Skipping opportunity: unusually high estimated profit (>0.5 SOL), likely unrealistic");
+            return Ok(false);
+        }
+        
         Ok(true)
     }
     
@@ -137,24 +207,21 @@ impl SolanaExecutor {
         }
     }
 
-    pub async fn execute_frontrun(&self, target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Logger::status_update(&format!("Attempting to frontrun transaction: {}", target_tx_signature));
+    pub async fn execute_frontrun(
+        &self, 
+        target_tx_signature: &str, 
+        estimated_profit: f64,
+        target_tx_details: Option<&Value>  // Include target transaction details for better strategy
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update(&format!("Attempting to frontrun transaction: {}, with estimated profit: {:.6} SOL", target_tx_signature, estimated_profit));
+        
+        let start_time = std::time::Instant::now();
         
         // Verificar si debemos continuar operando según los parámetros de riesgo
         if !self.should_continue_operation().await? {
+            self.record_transaction_analytics("frontrun", false, estimated_profit, 0.005).await;
             return Err("Operation halted due to risk management parameters".into());
         }
-        
-        // Calcular la rentabilidad antes de intentar el frontrun
-        let estimated_profit_result = self.estimate_profit_from_target(target_tx_signature);
-        let estimated_profit = match estimated_profit_result {
-            Ok(profit) => profit,
-            Err(e) => {
-                let error_msg = format!("Failed to estimate profit for transaction {}: {}", target_tx_signature, e);
-                Logger::error_occurred(&error_msg);
-                return Err(e);
-            }
-        };
         
         let fees_result = self.calculate_transaction_fees().await;
         let fees = match fees_result {
@@ -162,11 +229,20 @@ impl SolanaExecutor {
             Err(e) => {
                 let error_msg = format!("Failed to calculate transaction fees: {}", e);
                 Logger::error_occurred(&error_msg);
+                self.record_transaction_analytics("frontrun", false, -0.005, 0.005).await; // Use default fees value
                 return Err(e);
             }
         };
         
         let tip_amount = if self.use_jito { 0.001 } else { 0.0 }; // 0.001 SOL como propina para Jito
+        let total_cost = fees + tip_amount;
+        
+        // Check with risk manager if this transaction should be allowed
+        if !self.risk_manager.should_allow_transaction(estimated_profit, total_cost) {
+            Logger::status_update("Transaction rejected by risk manager");
+            self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
+            return Err("Transaction rejected by risk manager".into());
+        }
         
         let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
         
@@ -176,7 +252,16 @@ impl SolanaExecutor {
                 "Skipping opportunity with no positive profit potential: estimated profit {:.6} SOL", 
                 estimated_profit
             ));
+            self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
             return Err("No positive profit potential".into());
+        }
+        
+        // Run additional safety checks
+        let safety_ok = self.additional_safety_checks(estimated_profit, fees, tip_amount).await?;
+        if !safety_ok {
+            Logger::status_update("Skipping opportunity: failed additional safety checks");
+            self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
+            return Err("Failed additional safety checks".into());
         }
         
         // Verificar límites de riesgo adicionales
@@ -186,6 +271,7 @@ impl SolanaExecutor {
                 analysis.net_profit, 
                 estimated_profit * self.profit_calculator.min_profit_margin
             ));
+            self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
             return Err("Opportunity not profitable".into());
         }
         
@@ -196,6 +282,7 @@ impl SolanaExecutor {
                 -analysis.net_profit, 
                 self.max_loss_per_bundle
             ));
+            self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
             return Err("Opportunity exceeds maximum allowed loss".into());
         }
         
@@ -208,23 +295,25 @@ impl SolanaExecutor {
         
         let result = if self.use_jito {
             Logger::status_update("Using Jito for transaction priority");
-            self.execute_frontrun_with_jito(target_tx_signature).await
+            self.execute_frontrun_with_jito(target_tx_signature, target_tx_details).await
         } else {
             Logger::status_update("Using standard RPC for transaction");
-            // Crear una transacción firmada simulada
+            // Crear una transacción firmada basada en estrategia MEV
             let recent_blockhash_result = self.get_recent_blockhash().await;
             let recent_blockhash = match recent_blockhash_result {
                 Ok(hash) => hash,
                 Err(e) => {
                     Logger::error_occurred(&format!("Failed to get recent blockhash: {}", e));
+                    self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
                     return Err(e);
                 }
             };
             
-            let transaction_data = match self.create_signed_transaction(&recent_blockhash) {
+            let transaction_data = match self.create_mev_strategy_transaction(&recent_blockhash, target_tx_details).await {
                 Ok(data) => data,
                 Err(e) => {
-                    Logger::error_occurred(&format!("Failed to create signed transaction: {}", e));
+                    Logger::error_occurred(&format!("Failed to create MEV strategy transaction: {}", e));
+                    self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
                     return Err(e);
                 }
             };
@@ -238,25 +327,32 @@ impl SolanaExecutor {
                 },
                 Err(e) => {
                     Logger::error_occurred(&format!("Failed to send frontrun transaction: {}", e));
+                    self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
                     Err(e)
                 }
             }
         };
         
         // Registrar resultados de la ejecución
+        let execution_time = start_time.elapsed().as_millis() as f64;
         match &result {
             Ok(signature) => {
                 Logger::status_update(&format!("Frontrun successful: {}", signature));
+                // Record success in analytics
+                self.record_transaction_analytics("frontrun", true, estimated_profit - total_cost, total_cost).await;
+                self.record_opportunity_analytics("frontrun", true, true, estimated_profit, execution_time).await;
             },
             Err(e) => {
                 Logger::error_occurred(&format!("Frontrun failed: {}", e));
+                self.record_transaction_analytics("frontrun", false, -total_cost, total_cost).await;
+                self.record_opportunity_analytics("frontrun", true, false, -total_cost, execution_time).await;
             }
         };
         
         result
     }
 
-    async fn execute_frontrun_with_jito(&self, _target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    async fn execute_frontrun_with_jito(&self, _target_tx_signature: &str, target_tx_details: Option<&Value>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Logger::status_update("Preparing Jito bundle for frontrun");
         
         let recent_blockhash_result = self.get_recent_blockhash().await;
@@ -270,11 +366,11 @@ impl SolanaExecutor {
         };
         
         // Create the main transaction for the frontrun (without tip)
-        let main_transaction_data_result = self.create_signed_transaction(&recent_blockhash);
+        let main_transaction_data_result = self.create_mev_strategy_transaction(&recent_blockhash, target_tx_details).await;
         let main_transaction_data = match main_transaction_data_result {
             Ok(data) => data,
             Err(e) => {
-                let error_msg = format!("Failed to create transaction for Jito bundle: {}", e);
+                let error_msg = format!("Failed to create MEV strategy transaction for Jito bundle: {}", e);
                 Logger::error_occurred(&error_msg);
                 return Err(e);
             }
@@ -420,34 +516,35 @@ impl SolanaExecutor {
     }
 
     fn estimate_profit_from_target(&self, target_tx_signature: &str) -> Result<f64, Box<dyn std::error::Error + Send + Sync>> {
-        // En una implementación real, analizaríamos la transacción objetivo para estimar beneficios
-        // Por ahora, usamos una estimación basada en el hash de la transacción
-        if target_tx_signature.is_empty() {
-            let error_msg = "Cannot estimate profit from empty transaction signature".to_string();
-            Logger::error_occurred(&error_msg);
-            return Err(error_msg.into());
-        }
+        // This function should not be estimating profit based on signature alone
+        // In a real MEV bot, this would be handled by the mempool analysis
+        // which would determine actual profit potential
         
-        let profit_estimate = ((target_tx_signature.len() % 10000) as f64 / 100000.0) + 0.01; // Valor entre 0.01 - 0.1 SOL
+        // Since this function is being called from the executor, 
+        // we should return a conservative estimate or 0
+        // The actual profit estimation should happen in the mempool analysis phase
+        // where we can analyze the target transaction for real MEV opportunities
         
-        if profit_estimate <= 0.0 {
-            let error_msg = format!("Invalid profit estimate: {} for transaction: {}", profit_estimate, target_tx_signature);
-            Logger::error_occurred(&error_msg);
-            return Err(error_msg.into());
-        }
+        Logger::status_update(&format!(
+            "WARNING: estimate_profit_from_target called with signature {}, this indicates potential logic error.", 
+            target_tx_signature
+        ));
         
-        Ok(profit_estimate)
+        // Return 0 to indicate no profit potential from this approach
+        // Real profit estimation should happen in the mempool analysis phase
+        Ok(0.0)
     }
 
     fn create_signed_transaction(&self, blockhash: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // ESTA ES LA PARTE CLAVE - IMPLEMENTACIÓN REAL DE TRANSACCIÓN FIRMAADA
+        // Now creating a more realistic transaction for MEV strategies
         
         // Usamos keypair_data para demostrar que está siendo usado
         if self.keypair_data.is_empty() {
             return Err("Keypair data is empty".into());
         }
         
-        Logger::status_update(&format!("Creating signed transaction for frontrun with blockhash: {}", blockhash));
+        Logger::status_update(&format!("Creating signed transaction for MEV strategy with blockhash: {}", blockhash));
         
         // Usamos solana-sdk para crear una transacción firmada real
         use solana_sdk::{
@@ -462,12 +559,14 @@ impl SolanaExecutor {
         let keypair = Keypair::from_bytes(&self.keypair_data)
             .map_err(|e| format!("Invalid keypair data: {}", e))?;
         
-        // Creamos una dirección aleatoria como destino para la transacción de frontrun
-        let recipient = Pubkey::new_unique();
+        // For a more realistic MEV strategy, we'd create a swap transaction
+        // but since we don't have context about the target, we'll create a minimal transaction
+        // with a slightly more realistic approach
+        let recipient = keypair.pubkey(); // Send to self instead of random address
         let instruction = system_instruction::transfer(
             &keypair.pubkey(),
             &recipient,
-            1000, // 0.000001 SOL
+            1000, // 0.000001 SOL - minimal transfer to show activity
         );
         
         let message = Message::new(
@@ -490,6 +589,134 @@ impl SolanaExecutor {
         let encoded_tx = bs58::encode(serialized_tx).into_string();
         
         Ok(encoded_tx)
+    }
+
+    async fn create_mev_strategy_transaction(
+        &self,
+        blockhash: &str,
+        target_tx_details: Option<&Value>
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update("Creating MEV strategy transaction based on target transaction details");
+        
+        if self.keypair_data.is_empty() {
+            return Err("Keypair data is empty".into());
+        }
+
+        use solana_sdk::{
+            signature::{Keypair, Signer},
+            message::Message,
+            transaction::Transaction,
+            hash::Hash,
+        };
+        
+        let keypair = Keypair::from_bytes(&self.keypair_data)
+            .map_err(|e| format!("Invalid keypair data: {}", e))?;
+        
+        // Analyze the target transaction to determine the best strategy
+        let instructions = if let Some(target_details) = target_tx_details {
+            // Extract information from the target transaction to build an appropriate response
+            self.create_strategy_instructions(&keypair, target_details).await?
+        } else {
+            // Default fallback if no target transaction details available
+            vec![system_instruction::transfer(
+                &keypair.pubkey(),
+                &keypair.pubkey(), // Send to self to minimize risk
+                1000, // Minimal amount
+            )]
+        };
+        
+        let message = Message::new(
+            &instructions,
+            Some(&keypair.pubkey()),
+        );
+        
+        // Parse blockhash faster
+        use std::str::FromStr;
+        let blockhash = Hash::from_str(blockhash)
+            .map_err(|e| format!("Invalid blockhash: {}", e))?;
+        
+        let transaction = Transaction::new(
+            &[&keypair],
+            message,
+            blockhash,
+        );
+        
+        let serialized_tx = bincode::serialize(&transaction)
+            .map_err(|e| format!("Failed to serialize MEV strategy transaction: {}", e))?;
+        
+        let encoded_tx = bs58::encode(serialized_tx).into_string();
+        
+        Logger::status_update(&format!("MEV strategy transaction created with length: {}", encoded_tx.len()));
+        
+        Ok(encoded_tx)
+    }
+    
+    async fn create_strategy_instructions(
+        &self,
+        keypair: &Keypair,
+        target_tx_details: &Value,
+    ) -> Result<Vec<solana_sdk::instruction::Instruction>, Box<dyn std::error::Error + Send + Sync>> {
+        // Analyze the target transaction to determine which MEV strategy to implement
+        
+        // Check if it's a swap transaction by looking at the instructions
+        if let Some(transaction) = target_tx_details.get("transaction") {
+            if let Some(message) = transaction.get("message") {
+                if let Some(instructions) = message.get("instructions") {
+                    if let Some(instr_array) = instructions.as_array() {
+                        for instruction in instr_array {
+                            if let Some(accounts) = instruction.get("accounts").and_then(|v| v.as_array()) {
+                                // DEX swaps typically have multiple accounts (token accounts, vaults, etc.)
+                                if accounts.len() >= 4 {
+                                    // This looks like a swap transaction - implement appropriate strategy
+                                    return self.create_arbitrage_or_frontrun_instructions(keypair, target_tx_details).await;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Default to a simple transfer if no specific strategy can be determined
+        Ok(vec![system_instruction::transfer(
+            &keypair.pubkey(),
+            &keypair.pubkey(), // Send to self to minimize risk
+            1000, // Minimal amount
+        )])
+    }
+    
+    async fn create_arbitrage_or_frontrun_instructions(
+        &self,
+        keypair: &Keypair,
+        target_tx_details: &Value,
+    ) -> Result<Vec<solana_sdk::instruction::Instruction>, Box<dyn std::error::Error + Send + Sync>> {
+        // This would create actual DEX swap instructions for arbitrage or frontrunning
+        // For now, we'll create more realistic placeholder instructions
+        
+        // In a real implementation, this would:
+        // 1. Analyze the target swap
+        // 2. Get current pool states from Raydium, Orca, etc.
+        // 3. Create swap instructions to exploit price differences
+        // 4. Use Jupiter API for optimal routing if needed
+        
+        use solana_sdk::system_instruction;
+        
+        // Example: Create a sequence of instructions that would perform an arbitrage
+        // This is still a placeholder but more representative of what real MEV would look like
+        let instructions = vec![
+            system_instruction::transfer(
+                &keypair.pubkey(),
+                &keypair.pubkey(), // Placeholder for swap input
+                5000, // More substantial amount
+            ),
+            system_instruction::transfer(
+                &keypair.pubkey(),
+                &keypair.pubkey(), // Placeholder for swap output
+                1000, // Placeholder for output 
+            )
+        ];
+        
+        Ok(instructions)
     }
 
     fn create_tip_transaction(&self, blockhash: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
@@ -583,17 +810,19 @@ impl SolanaExecutor {
         }
     }
 
-    pub async fn execute_sandwich(&self, target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Logger::status_update(&format!("Attempting to execute sandwich for transaction: {}", target_tx_signature));
+    pub async fn execute_sandwich(
+        &self, 
+        target_tx_signature: &str, 
+        estimated_profit: f64,
+        target_tx_details: Option<&Value>  // Include target transaction details for better strategy
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update(&format!("Attempting to execute sandwich for transaction: {}, with estimated profit: {:.6} SOL", target_tx_signature, estimated_profit));
         
         // Verificar si debemos continuar operando según los parámetros de riesgo
         if !self.should_continue_operation().await? {
             return Err("Operation halted due to risk management parameters".into());
         }
         
-        // Para el sandwich, buscamos arbitrajes específicos donde podemos envolver
-        // una transacción de swap con dos operaciones de compra/venta
-        let estimated_profit = self.estimate_profit_from_target(target_tx_signature)?;
         let fees = self.calculate_transaction_fees().await?;
         let tip_amount = if self.use_jito { 0.001 } else { 0.0 }; // 0.001 SOL como propina para Jito
         
@@ -604,6 +833,13 @@ impl SolanaExecutor {
                 estimated_profit
             ));
             return Err("No positive profit potential".into());
+        }
+        
+        // Run additional safety checks
+        let safety_ok = self.additional_safety_checks(estimated_profit, fees, tip_amount).await?;
+        if !safety_ok {
+            Logger::status_update("Skipping sandwich opportunity: failed additional safety checks");
+            return Err("Failed additional safety checks".into());
         }
         
         let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
@@ -637,10 +873,10 @@ impl SolanaExecutor {
         // se requerirían múltiples transacciones coordinadas
         let result = if self.use_jito {
             Logger::status_update("Using Jito for sandwich transaction priority");
-            self.execute_sandwich_with_jito(target_tx_signature).await
+            self.execute_sandwich_with_jito(target_tx_signature, target_tx_details).await
         } else {
             Logger::status_update("Using standard RPC for sandwich transaction");
-            // Crear una transacción firmada simulada
+            // Crear una transacción firmada basada en estrategia MEV
             let recent_blockhash_result = self.get_recent_blockhash().await;
             let recent_blockhash = match recent_blockhash_result {
                 Ok(hash) => hash,
@@ -650,10 +886,10 @@ impl SolanaExecutor {
                 }
             };
             
-            let transaction_data = match self.create_signed_transaction(&recent_blockhash) {
+            let transaction_data = match self.create_mev_strategy_transaction(&recent_blockhash, target_tx_details).await {
                 Ok(data) => data,
                 Err(e) => {
-                    Logger::error_occurred(&format!("Failed to create signed transaction: {}", e));
+                    Logger::error_occurred(&format!("Failed to create MEV strategy transaction: {}", e));
                     return Err(e);
                 }
             };
@@ -685,7 +921,7 @@ impl SolanaExecutor {
         result
     }
 
-    async fn execute_sandwich_with_jito(&self, _target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    async fn execute_sandwich_with_jito(&self, _target_tx_signature: &str, target_tx_details: Option<&Value>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Logger::status_update("Preparing Jito bundle for sandwich");
         
         let recent_blockhash_result = self.get_recent_blockhash().await;
@@ -699,11 +935,11 @@ impl SolanaExecutor {
         };
         
         // Create the main transaction for the sandwich (without tip)
-        let main_transaction_data_result = self.create_signed_transaction(&recent_blockhash);
+        let main_transaction_data_result = self.create_mev_strategy_transaction(&recent_blockhash, target_tx_details).await;
         let main_transaction_data = match main_transaction_data_result {
             Ok(data) => data,
             Err(e) => {
-                let error_msg = format!("Failed to create transaction for Jito bundle: {}", e);
+                let error_msg = format!("Failed to create MEV strategy transaction for Jito bundle: {}", e);
                 Logger::error_occurred(&error_msg);
                 return Err(e);
             }
@@ -750,16 +986,19 @@ impl SolanaExecutor {
         }
     }
 
-    pub async fn execute_arbitrage(&self, target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Logger::status_update(&format!("Attempting to execute arbitrage for transaction: {}", target_tx_signature));
+    pub async fn execute_arbitrage(
+        &self, 
+        target_tx_signature: &str, 
+        estimated_profit: f64,
+        target_tx_details: Option<&Value>  // Include target transaction details for better strategy
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update(&format!("Attempting to execute arbitrage for transaction: {}, with estimated profit: {:.6} SOL", target_tx_signature, estimated_profit));
         
         // Verificar si debemos continuar operando según los parámetros de riesgo
         if !self.should_continue_operation().await? {
             return Err("Operation halted due to risk management parameters".into());
         }
         
-        // Para arbitraje, buscamos oportunidades de precios diferentes en DEXs
-        let estimated_profit = self.estimate_profit_from_target(target_tx_signature)?;
         let fees = self.calculate_transaction_fees().await?;
         let tip_amount = if self.use_jito { 0.001 } else { 0.0 }; // 0.001 SOL como propina para Jito
         
@@ -770,6 +1009,13 @@ impl SolanaExecutor {
                 estimated_profit
             ));
             return Err("No positive profit potential".into());
+        }
+        
+        // Run additional safety checks
+        let safety_ok = self.additional_safety_checks(estimated_profit, fees, tip_amount).await?;
+        if !safety_ok {
+            Logger::status_update("Skipping arbitrage opportunity: failed additional safety checks");
+            return Err("Failed additional safety checks".into());
         }
         
         let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
@@ -803,10 +1049,10 @@ impl SolanaExecutor {
         // se requerirían múltiples operaciones coordinadas
         let result = if self.use_jito {
             Logger::status_update("Using Jito for arbitrage transaction priority");
-            self.execute_arbitrage_with_jito(target_tx_signature).await
+            self.execute_arbitrage_with_jito(target_tx_signature, target_tx_details).await
         } else {
             Logger::status_update("Using standard RPC for arbitrage transaction");
-            // Crear una transacción firmada simulada
+            // Crear una transacción firmada basada en estrategia MEV
             let recent_blockhash_result = self.get_recent_blockhash().await;
             let recent_blockhash = match recent_blockhash_result {
                 Ok(hash) => hash,
@@ -816,10 +1062,10 @@ impl SolanaExecutor {
                 }
             };
             
-            let transaction_data = match self.create_signed_transaction(&recent_blockhash) {
+            let transaction_data = match self.create_mev_strategy_transaction(&recent_blockhash, target_tx_details).await {
                 Ok(data) => data,
                 Err(e) => {
-                    Logger::error_occurred(&format!("Failed to create signed transaction: {}", e));
+                    Logger::error_occurred(&format!("Failed to create MEV strategy transaction: {}", e));
                     return Err(e);
                 }
             };
@@ -851,7 +1097,7 @@ impl SolanaExecutor {
         result
     }
 
-    async fn execute_arbitrage_with_jito(&self, _target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    async fn execute_arbitrage_with_jito(&self, _target_tx_signature: &str, target_tx_details: Option<&Value>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Logger::status_update("Preparing Jito bundle for arbitrage");
         
         let recent_blockhash_result = self.get_recent_blockhash().await;
@@ -865,11 +1111,11 @@ impl SolanaExecutor {
         };
         
         // Create the main transaction for the arbitrage (without tip)
-        let main_transaction_data_result = self.create_signed_transaction(&recent_blockhash);
+        let main_transaction_data_result = self.create_mev_strategy_transaction(&recent_blockhash, target_tx_details).await;
         let main_transaction_data = match main_transaction_data_result {
             Ok(data) => data,
             Err(e) => {
-                let error_msg = format!("Failed to create transaction for Jito bundle: {}", e);
+                let error_msg = format!("Failed to create MEV strategy transaction for Jito bundle: {}", e);
                 Logger::error_occurred(&error_msg);
                 return Err(e);
             }
@@ -916,18 +1162,19 @@ impl SolanaExecutor {
         }
     }    
 
-    pub async fn execute_snipe(&self, target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        Logger::status_update(&format!("Attempting to snipe transaction: {}", target_tx_signature));
+    pub async fn execute_snipe(
+        &self, 
+        target_tx_signature: &str, 
+        estimated_profit: f64,
+        target_tx_details: Option<&Value>  // Include target transaction details for better strategy
+    ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+        Logger::status_update(&format!("Attempting to snipe transaction: {}, with estimated profit: {:.6} SOL", target_tx_signature, estimated_profit));
         
         // Verificar si debemos continuar operando según los parámetros de riesgo
         if !self.should_continue_operation().await? {
             return Err("Operation halted due to risk management parameters".into());
         }
         
-        // Para el snipe, buscamos oportunidades como nuevos Pools, Liquidity Adds, etc.
-        // En lugar de frontrunear una transacción, buscamos oportunidades de snipe
-        // como comprar tokens justo cuando se añade liquidez o al inicio de un pool
-        let estimated_profit = self.estimate_profit_from_target(target_tx_signature)?;
         let fees = self.calculate_transaction_fees().await?;
         let tip_amount = if self.use_jito { 0.001 } else { 0.0 }; // 0.001 SOL como propina para Jito
         
@@ -938,6 +1185,13 @@ impl SolanaExecutor {
                 estimated_profit
             ));
             return Err("No positive profit potential".into());
+        }
+        
+        // Run additional safety checks
+        let safety_ok = self.additional_safety_checks(estimated_profit, fees, tip_amount).await?;
+        if !safety_ok {
+            Logger::status_update("Skipping snipe opportunity: failed additional safety checks");
+            return Err("Failed additional safety checks".into());
         }
         
         let analysis = self.profit_calculator.calculate_profitability(estimated_profit, fees, tip_amount);
@@ -970,10 +1224,10 @@ impl SolanaExecutor {
         // El método de ejecución es similar al frontrun pero conceptualmente diferente
         let result = if self.use_jito {
             Logger::status_update("Using Jito for snipe transaction priority");
-            self.execute_snipe_with_jito(target_tx_signature).await
+            self.execute_snipe_with_jito(target_tx_signature, target_tx_details).await
         } else {
             Logger::status_update("Using standard RPC for snipe transaction");
-            // Crear una transacción firmada simulada
+            // Crear una transacción firmada basada en estrategia MEV
             let recent_blockhash_result = self.get_recent_blockhash().await;
             let recent_blockhash = match recent_blockhash_result {
                 Ok(hash) => hash,
@@ -983,10 +1237,10 @@ impl SolanaExecutor {
                 }
             };
             
-            let transaction_data = match self.create_signed_transaction(&recent_blockhash) {
+            let transaction_data = match self.create_mev_strategy_transaction(&recent_blockhash, target_tx_details).await {
                 Ok(data) => data,
                 Err(e) => {
-                    Logger::error_occurred(&format!("Failed to create signed transaction: {}", e));
+                    Logger::error_occurred(&format!("Failed to create MEV strategy transaction: {}", e));
                     return Err(e);
                 }
             };
@@ -1018,7 +1272,7 @@ impl SolanaExecutor {
         result
     }
 
-    async fn execute_snipe_with_jito(&self, _target_tx_signature: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    async fn execute_snipe_with_jito(&self, _target_tx_signature: &str, target_tx_details: Option<&Value>) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         Logger::status_update("Preparing Jito bundle for snipe");
         
         let recent_blockhash_result = self.get_recent_blockhash().await;
@@ -1032,11 +1286,11 @@ impl SolanaExecutor {
         };
         
         // Create the main transaction for the snipe (without tip)
-        let main_transaction_data_result = self.create_signed_transaction(&recent_blockhash);
+        let main_transaction_data_result = self.create_mev_strategy_transaction(&recent_blockhash, target_tx_details).await;
         let main_transaction_data = match main_transaction_data_result {
             Ok(data) => data,
             Err(e) => {
-                let error_msg = format!("Failed to create transaction for Jito bundle: {}", e);
+                let error_msg = format!("Failed to create MEV strategy transaction for Jito bundle: {}", e);
                 Logger::error_occurred(&error_msg);
                 return Err(e);
             }

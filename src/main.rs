@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
         Network::Devnet => "DEVNET",
     };
     
-    let strategy = env::var("STRATEGY").unwrap_or_else(|_| "frontrun".to_string());
+    let strategy = env::var("STRATEGY").unwrap_or_else(|_| "arbitrage".to_string());
     println!("Debug: Strategy value read from env: {}", strategy);  // Debug line
 
     Logger::startup(network_str, &strategy);
@@ -36,7 +36,9 @@ async fn main() -> Result<()> {
         println!("Debug: Starting Solana mempool...");
         let sol_mempool = SolanaMempool::new(&network);
         Logger::solana_monitor_start();
-        tokio::spawn(async move { sol_mempool.start().await });
+        tokio::spawn(async move {
+            sol_mempool.start().await
+        });
     } else {
         println!("Debug: No Solana strategies enabled");
     }

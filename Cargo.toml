@@ -21,6 +21,7 @@ colored = "2.0"
 
 # Utilities
 rand = "0.8"
+itertools = "0.12"
 
 # HTTP client for connecting to Solana RPC
 reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
@@ -40,3 +41,17 @@ tokio-tungstenite = { version = "0.20.1", features = ["rustls-tls-native-roots"]
 solana-sdk = "1.17"
 solana-client = "1.17"
 
+# For advanced MEV features
+rust_decimal = "1.30"
+rust_decimal_macros = "1.30"
+
+# Performance optimization
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1

@@ -1,4 +1,5 @@
 .env
 
 /target/debug/
+/target/release/
 /logs/

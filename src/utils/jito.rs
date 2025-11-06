@@ -12,9 +12,11 @@ pub struct JitoClient {
 
 impl JitoClient {
     pub fn new() -> Option<Self> {
-        let jito_rpc_url = std::env::var("JITO_RPC_URL").ok()?;
+        // Try to get JITO_RPC_URL from environment, otherwise default to mainnet endpoint
+        let jito_rpc_url = std::env::var("JITO_RPC_URL")
+            .unwrap_or_else(|_| "https://mainnet.block-engine.jito.wtf:443".to_string());
         
-        // La autenticación para Jito normalmente requiere credenciales
+        // Jito authentication header (if provided)
         let auth_header = std::env::var("JITO_AUTH_HEADER").ok();
         
         // Jito tip accounts - these are the official tip account addresses
@@ -45,12 +47,26 @@ impl JitoClient {
 
         let mut request = self.client.post(&self.jito_rpc_url).json(&request_body);
         
-        // Agregar header de autenticación si está disponible
+        // Add authentication header if available
         if let Some(auth) = &self.auth_header {
             request = request.header("Authorization", auth);
         }
 
-        let response: Value = request.send().await?.json().await?;
+        // Add proper headers with faster timeout
+        request = request
+            .header("Content-Type", "application/json")
+            .timeout(std::time::Duration::from_secs(10)); // Reduce timeout to speed up failed requests
+
+        let response = request.send().await?;
+        
+        // Check if response status is successful
+        if !response.status().is_success() {
+            return Err(format!("Jito bundle request failed with status: {}", response.status()).into());
+        }
+        
+        let response_text = response.text().await?;
+        let response: Value = serde_json::from_str(&response_text)
+            .map_err(|e| format!("Failed to parse Jito response as JSON: {}", e))?;
 
         if let Some(error) = response.get("error") {
             return Err(format!("Jito bundle failed: {}", error).into());

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+#[derive(Clone)]
 pub struct ProfitCalculator {
     pub base_fee: f64,           // Costo base de la transacción
     pub gas_price: f64,          // Precio actual del gas
@@ -62,18 +63,13 @@ impl ProfitCalculator {
     }
 
     pub fn estimate_opportunity_profit(&self, transaction_data: &str) -> f64 {
-        // En una implementación completa, analizaríamos la transacción para estimar beneficios
-        // Por ahora, usamos una estimación básica basada en patrones comunes
-        if transaction_data.contains("swap") || transaction_data.contains("Swap") {
-            // Si parece una transacción de swap, estimamos un beneficio promedio
-            (transaction_data.len() % 1000) as f64 / 10000.0 + 0.01
-        } else if transaction_data.contains("arbitrage") {
-            // Si parece una operación de arbitraje
-            (transaction_data.len() % 1000) as f64 / 5000.0 + 0.02
-        } else {
-            // Valor por defecto para otras transacciones
-            (transaction_data.len() % 1000) as f64 / 20000.0 + 0.001
-        }
+        // This method should not be used for actual profit estimation anymore
+        // Real profit estimation should happen in the mempool analysis phase
+        // where we can examine actual transaction content for MEV opportunities
+        
+        // Return 0 to indicate no profit potential from this method
+        // since it doesn't have access to the actual transaction details
+        0.0
     }
 }
 
